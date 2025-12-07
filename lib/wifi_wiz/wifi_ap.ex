@@ -21,14 +21,16 @@ defmodule WifiWiz.Ap do
       create_sta_config(nvs_config)
       |> start_sta()
     else
+      cbs = Keyword.take(ap_opts, [:ap_started])
+
       # no persisted config - run ap to collect creds
-      create_ap_config(ap_opts[:ssid], ap_opts[:psk])
+      create_ap_config(ap_opts[:ssid], ap_opts[:psk], cbs)
       |> start_ap()
     end
   end
 
   defp start_sta(config) do
-    case :network.wait_for_sta(config[:sta], 10000) do
+    case :network.wait_for_sta(config[:sta]) do
       {:ok, {ip, _mask, gateway}} = resp ->
         IO.puts("Got #{inspect(ip)} from #{inspect(gateway)}")
 
@@ -86,7 +88,9 @@ defmodule WifiWiz.Ap do
     ]
   end
 
-  defp create_ap_config(ssid, psk) do
+  defp create_ap_config(ssid, psk, callbacks \\ []) do
+    ap_started = callbacks[:ap_started] || fn -> end
+
     ap_config = [
       ssid: ssid,
       psk: psk,
@@ -95,6 +99,8 @@ defmodule WifiWiz.Ap do
         # spawn dns + http services
         spawn(fn -> WifiWiz.DNS.start() end)
         spawn(fn -> WifiWiz.CaptiveHTTP.start() end)
+        ap_started.()
+
       end,
       sta_connected: fn mac ->
         IO.puts("STA connected with mac #{inspect(mac)}")
