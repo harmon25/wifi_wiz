@@ -11,7 +11,8 @@ defmodule WifiWiz.MixProject do
       atomvm: [
         start: WifiWiz.Demo,
         flash_offset: 0x250000
-      ]
+      ],
+      xref: [exclude: [:network, :esp]]
     ]
   end
 

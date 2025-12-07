@@ -36,9 +36,12 @@ defmodule WifiWiz.Ap do
 
       {:error, reason} ->
         IO.puts("failed to connect for #{reason}, clearing config + rebooting")
-        Process.sleep(5000)
         WifiWiz.Config.reset()
+        Process.sleep(5000)
+
         :esp.restart()
+        # not sure we will get here after the reboot, but return error anyway
+        {:error, :rebooting}
     end
   end
 

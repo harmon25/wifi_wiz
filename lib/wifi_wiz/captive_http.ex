@@ -16,19 +16,22 @@ defmodule WifiWiz.CaptiveHTTP do
       #  %{
       #    handler: :httpd_file_handler,
       #    handler_config: %{
-      #      app: :wifi
+      #      app: :wifi_wiz
       #    }
       #  }}
     ]
 
     IO.puts("Starting httpd on port #{port}")
 
-    case :httpd.start(port, config) do
-      {:ok, _pid} ->
+    case AtomvmHttpd.start(port, config) do
+      {:ok, pid} ->
         IO.puts("httpd started")
+
+        {:ok, pid}
 
       err ->
         :io.format("An error occurred: ~p~n", [err])
+        {:error, err}
     end
   end
 
@@ -63,19 +66,24 @@ defmodule WifiWiz.CaptiveHTTP do
     # extract body (ssid + psk and store in nvs)
     params = parse_form_body(body)
     IO.puts("received params:\n#{inspect(params)}")
-    WifiWiz.Config.put(params.ssid, params.psk)
+    {:ok, config} = WifiWiz.Config.put(params.ssid, params.psk)
 
     body = """
     <section class="card">
-      <h2>Connecting to Wi-Fi...</h2>
+      <h2>Connecting to #{config[:ssid]}...</h2>
       <p>Your credentials were received. Attempting to join the network now.</p>
       <p>The device may reboot or reconnect shortly. Feel free to close this tab.</p>
     </section>
+    <script>
+      setTimeout(()=>{
+       window.close()
+      }, 5500)
+    </script>
     """
 
     # restart after responding to post req
     spawn(fn ->
-      Process.sleep(2500)
+      Process.sleep(5000)
       :esp.restart()
     end)
 
@@ -96,7 +104,6 @@ defmodule WifiWiz.CaptiveHTTP do
       _, acc -> acc
     end)
   end
-
 
   defp render_html(contents, title \\ @page_title) do
     """
