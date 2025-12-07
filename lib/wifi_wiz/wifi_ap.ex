@@ -5,9 +5,6 @@ defmodule WifiWiz.Ap do
   WIP - captive portal - to allow updating wifi credentials for STA mode
   """
 
-
-
-
   @doc """
   Wifi configuration helper
 
@@ -18,12 +15,13 @@ defmodule WifiWiz.Ap do
     ap_opts = Keyword.get(opts, :ap)
     #  WifiWiz.Config.reset()
     # if we have persisted ssid + psk connect as sta, do not run ap.
-    nvs_config =  WifiWiz.Config.get()
+    nvs_config = WifiWiz.Config.get()
 
     if nvs_config[:ssid] !== "" and nvs_config[:psk] !== "" do
       create_sta_config(nvs_config)
       |> start_sta()
     else
+      # no persisted config - run ap to collect creds
       create_ap_config(ap_opts[:ssid], ap_opts[:psk])
       |> start_ap()
     end
@@ -31,15 +29,15 @@ defmodule WifiWiz.Ap do
 
   defp start_sta(config) do
     case :network.wait_for_sta(config[:sta], 10000) do
-      {:ok, {ip, _mask, gateway}} ->
-        IO.inspect("Got #{inspect(ip)} from #{inspect(gateway)}")
+      {:ok, {ip, _mask, gateway}} = resp ->
+        IO.puts("Got #{inspect(ip)} from #{inspect(gateway)}")
 
-        Process.sleep(:infinity)
+        resp
 
       {:error, reason} ->
-        IO.inspect("failed to connect for #{reason}, clearing config + rebooting")
+        IO.puts("failed to connect for #{reason}, clearing config + rebooting")
         Process.sleep(5000)
-         WifiWiz.Config.reset()
+        WifiWiz.Config.reset()
         :esp.restart()
     end
   end
@@ -48,6 +46,7 @@ defmodule WifiWiz.Ap do
     case :network.start(config) do
       {:ok, _pid} ->
         IO.puts("AP Network started! - waiting for credentials")
+        # this blocks indefinitely - wait until connected before moving onto to user code
         Process.sleep(:infinity)
 
       error ->
@@ -59,13 +58,13 @@ defmodule WifiWiz.Ap do
     sta_config =
       [
         connected: fn ->
-          IO.inspect("Connected to #{nvs_config[:ssid]}")
+          IO.puts("Connected to #{nvs_config[:ssid]}")
         end,
         got_ip: fn {ip, _netmask, gateway} ->
-          IO.inspect("Got #{inspect(ip)} from #{inspect(gateway)}")
+          IO.puts("Got #{inspect(ip)} from #{inspect(gateway)}")
         end,
         disconnected: fn ->
-          IO.inspect("Disconnected from #{nvs_config[:ssid]}")
+          IO.puts("Disconnected from #{nvs_config[:ssid]}")
           # must be bad creds? clear and reboot
         end
       ] ++
@@ -90,7 +89,7 @@ defmodule WifiWiz.Ap do
       psk: psk,
       ap_started: fn ->
         IO.puts("WifiWiz.AP Started ")
-
+        # spawn dns + http services
         spawn(fn -> WifiWiz.DNS.start() end)
         spawn(fn -> WifiWiz.CaptiveHTTP.start() end)
       end,
