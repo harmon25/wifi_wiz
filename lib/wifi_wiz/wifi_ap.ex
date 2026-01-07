@@ -88,8 +88,8 @@ defmodule WifiWiz.Ap do
     ]
   end
 
-  defp create_ap_config(ssid, psk, callbacks \\ []) do
-    ap_started = callbacks[:ap_started] || fn -> end
+  defp create_ap_config(ssid, psk, callbacks) do
+    ap_started = callbacks[:ap_started] || fn -> :ok end
 
     ap_config = [
       ssid: ssid,
