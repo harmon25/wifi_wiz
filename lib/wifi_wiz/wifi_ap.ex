@@ -29,21 +29,23 @@ defmodule WifiWiz.Ap do
     end
   end
 
-  defp start_sta(config) do
+  defp start_sta(config, retries \\ 3) do
     case :network.wait_for_sta(config[:sta]) do
-      {:ok, {ip, _mask, gateway}} = resp ->
-        IO.puts("Got #{inspect(ip)} from #{inspect(gateway)}")
+      {:ok, {ip, _mask, _gateway}} ->
+        IO.puts("Got #{inspect(ip)}")
+        # keep this process alive so AtomVM doesn't reclaim network resources
+        Process.sleep(:infinity)
 
-        resp
+      {:error, reason} when retries > 0 ->
+        IO.puts("STA failed (#{reason}), #{retries - 1} retries left")
+        Process.sleep(3000)
+        start_sta(config, retries - 1)
 
       {:error, reason} ->
-        IO.puts("failed to connect for #{reason}, clearing config + rebooting")
+        IO.puts("STA failed #{reason} after 3 tries, clearing creds + rebooting")
         WifiWiz.Config.reset()
         Process.sleep(5000)
-
         :esp.restart()
-        # not sure we will get here after the reboot, but return error anyway
-        {:error, :rebooting}
     end
   end
 
@@ -69,8 +71,8 @@ defmodule WifiWiz.Ap do
           IO.puts("Got #{inspect(ip)} from #{inspect(gateway)}")
         end,
         disconnected: fn ->
-          IO.puts("Disconnected from #{nvs_config[:ssid]}")
-          # must be bad creds? clear and reboot
+          IO.puts("Disconnected — rebooting to retry")
+          :esp.restart()
         end
       ] ++
         nvs_config
