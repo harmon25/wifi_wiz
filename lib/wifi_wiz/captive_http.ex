@@ -28,14 +28,17 @@ defmodule WifiWiz.CaptiveHTTP do
   end
 
   def init_handler(suffix, config) do
-    results = case Map.get(config, :scan_results) do
-      nil -> []
-      r -> r
-    end
+    results =
+      case Map.get(config, :scan_results) do
+        nil -> []
+        r -> r
+      end
+
     {:ok, %{path_suffix: suffix, scan_results: results}}
   end
 
   defp opt_lines([], acc), do: :lists.reverse(acc)
+
   defp opt_lines([net | rest], acc) do
     ssid = escape_html(Map.get(net, :ssid, ""))
     rssi = Map.get(net, :rssi, 0)
@@ -51,10 +54,12 @@ defmodule WifiWiz.CaptiveHTTP do
 
     case Map.get(req, :method) do
       :get ->
-        nets = case Map.get(state, :scan_results) do
-          nil -> []
-          r -> r
-        end
+        nets =
+          case Map.get(state, :scan_results) do
+            nil -> []
+            r -> r
+          end
+
         :io.format("HTTP rendering ~p nets~n", [:erlang.length(nets)])
         options = join_lines(opt_lines(nets, []))
 
@@ -94,7 +99,7 @@ defmodule WifiWiz.CaptiveHTTP do
 
         body = """
         <section class="card">
-          <h2>Connecting to #{Map.get(config, :ssid)}...</h2>
+          <h2>Connecting to #{:proplists.get_value(:ssid, config)}...</h2>
           <p>Your credentials were received. Attempting to join the network now.</p>
           <p>The device may reboot or reconnect shortly. Feel free to close this tab.</p>
         </section>
@@ -118,11 +123,15 @@ defmodule WifiWiz.CaptiveHTTP do
   end
 
   defp parse_form_body(body) do
-    :lists.foldl(fn
-      "ssid=" <> ssid, acc -> Map.put(acc, :ssid, ssid)
-      "psk=" <> psk, acc -> Map.put(acc, :psk, psk)
-      _, acc -> acc
-    end, %{}, :binary.split(body, "&"))
+    :lists.foldl(
+      fn
+        "ssid=" <> ssid, acc -> Map.put(acc, :ssid, ssid)
+        "psk=" <> psk, acc -> Map.put(acc, :psk, psk)
+        _, acc -> acc
+      end,
+      %{},
+      :binary.split(body, "&")
+    )
   end
 
   defp escape_html(binary) when is_binary(binary) do

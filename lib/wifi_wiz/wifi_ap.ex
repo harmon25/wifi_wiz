@@ -106,38 +106,49 @@ defmodule WifiWiz.Ap do
 
           networks =
             case scan_result do
-              {:ok, {_num, nets}} ->
-                IO.puts("WifiWiz: got #{_num} nets")
+              {:ok, {num, nets}} ->
+                IO.puts("WifiWiz: got #{num} nets")
                 nets
+
               _other ->
                 IO.puts("WifiWiz: scan fail")
                 []
             end
 
-          filtered = :lists.filter(
-            fn net -> Map.get(net, :ssid, "") != "" end,
-            networks
-          )
-          sorted = :lists.sort(
-            fn a, b -> Map.get(a, :rssi, -100) >= Map.get(b, :rssi, -100) end,
-            filtered
-          )
-          deduped = :lists.foldl(
-            fn net, acc ->
-              ssid = Map.get(net, :ssid)
-              case :lists.any(fn n -> Map.get(n, :ssid) == ssid end, acc) do
-                true -> acc
-                false -> [net | acc]
-              end
-            end,
-            [],
-            sorted
-          )
+          filtered =
+            :lists.filter(
+              fn net -> Map.get(net, :ssid, "") != "" end,
+              networks
+            )
+
+          sorted =
+            :lists.sort(
+              fn a, b -> Map.get(a, :rssi, -100) >= Map.get(b, :rssi, -100) end,
+              filtered
+            )
+
+          deduped =
+            :lists.foldl(
+              fn net, acc ->
+                ssid = Map.get(net, :ssid)
+
+                case :lists.any(fn n -> Map.get(n, :ssid) == ssid end, acc) do
+                  true -> acc
+                  false -> [net | acc]
+                end
+              end,
+              [],
+              sorted
+            )
+
           sorted = :lists.reverse(deduped)
 
-          :lists.foreach(fn net ->
-            IO.puts("SSID: #{Map.get(net, :ssid, "")} RSSI: #{Map.get(net, :rssi, 0)}")
-          end, sorted)
+          :lists.foreach(
+            fn net ->
+              IO.puts("SSID: #{Map.get(net, :ssid, "")} RSSI: #{Map.get(net, :rssi, 0)}")
+            end,
+            sorted
+          )
 
           WifiWiz.CaptiveHTTP.start(sorted)
         end)
