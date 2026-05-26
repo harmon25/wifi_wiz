@@ -9,7 +9,7 @@ defmodule WifiWiz.CaptiveHTTP do
       {[],
        %{
          handler: __MODULE__,
-         scan_results: scan_results
+         handler_config: %{scan_results: scan_results}
        }}
     ]
 
@@ -28,94 +28,101 @@ defmodule WifiWiz.CaptiveHTTP do
   end
 
   def init_handler(suffix, config) do
-    {:ok, %{path_suffix: suffix, scan_results: config[:scan_results] || []}}
+    results = case Map.get(config, :scan_results) do
+      nil -> []
+      r -> r
+    end
+    {:ok, %{path_suffix: suffix, scan_results: results}}
   end
 
-  def handle_http_req(%{method: :get} = _req, state) do
-    options =
-      (state[:scan_results] || [])
-      |> Enum.map(fn net ->
-        ssid = escape_html(Map.get(net, :ssid, ""))
-        rssi = Map.get(net, :rssi, 0)
-        ~s[<option value="#{ssid}">#{ssid} (#{rssi} dBm)</option>]
-      end)
-      |> Enum.join("\n      ")
-
-    body = """
-    <main class="card">
-      <h1>AtomVM Wi-Fi Setup</h1>
-      <p>Select or enter your network SSID and passphrase.</p>
-      <form method="POST" action="/save">
-        <label for="network-select">Available networks</label>
-        <select id="network-select" onchange="fillSSID(this)">
-          <option value="">-- Select a network --</option>
-          #{options}
-          <option value="__custom__">Custom network...</option>
-        </select>
-        <label for="ssid">Network SSID</label>
-        <input id="ssid" name="ssid" type="text" inputmode="text" autocapitalize="none" autocomplete="off" required />
-        <label for="psk">Passphrase</label>
-        <input id="psk" name="psk" type="password" inputmode="text" autocapitalize="none" autocomplete="off" required />
-        <button type="submit">Save and Connect</button>
-      </form>
-      <script>
-        function fillSSID(sel) {
-          var val = sel.value;
-          document.getElementById('ssid').value = val === '__custom__' ? '' : val;
-        }
-      </script>
-    </main>
-    """
-
-    {:close, %{"Content-Type" => "text/html"}, render_html(body)}
+  defp opt_lines([], acc), do: :lists.reverse(acc)
+  defp opt_lines([net | rest], acc) do
+    ssid = escape_html(Map.get(net, :ssid, ""))
+    rssi = Map.get(net, :rssi, 0)
+    :io.format("HTTP option ssid=~s rssi=~p~n", [ssid, rssi])
+    opt_lines(rest, [~s[<option value="#{ssid}">#{ssid} (#{rssi} dBm)</option>] | acc])
   end
 
-  def handle_http_req(%{method: :post} = req, _state) do
-    %{
-      headers: _headers,
-      body: body
-    } = req
+  defp join_lines([]), do: ""
+  defp join_lines([h | t]), do: :lists.foldl(fn a, b -> a <> "\n      " <> b end, h, t)
 
-    # extract body (ssid + psk and store in nvs)
-    params = parse_form_body(body)
-    IO.puts("received params:\n#{inspect(params)}")
-    {:ok, config} = WifiWiz.Config.put(params.ssid, params.psk)
+  def handle_http_req(req, state) do
+    :io.format("HTTP req method=~p~n", [Map.get(req, :method)])
 
-    body = """
-    <section class="card">
-      <h2>Connecting to #{config[:ssid]}...</h2>
-      <p>Your credentials were received. Attempting to join the network now.</p>
-      <p>The device may reboot or reconnect shortly. Feel free to close this tab.</p>
-    </section>
-    <script>
-      setTimeout(()=>{
-       window.close()
-      }, 5500)
-    </script>
-    """
+    case Map.get(req, :method) do
+      :get ->
+        nets = case Map.get(state, :scan_results) do
+          nil -> []
+          r -> r
+        end
+        :io.format("HTTP rendering ~p nets~n", [:erlang.length(nets)])
+        options = join_lines(opt_lines(nets, []))
 
-    # restart after responding to post req
-    spawn(fn ->
-      Process.sleep(5000)
-      :esp.restart()
-    end)
+        body = """
+        <main class="card">
+          <h1>AtomVM Wi-Fi Setup</h1>
+          <p>Select or enter your network SSID and passphrase.</p>
+          <form method="POST" action="/save">
+            <label for="network-select">Available networks</label>
+            <select id="network-select" onchange="fillSSID(this)">
+              <option value="">-- Select a network --</option>
+              #{options}
+              <option value="__custom__">Custom network...</option>
+            </select>
+            <label for="ssid">Network SSID</label>
+            <input id="ssid" name="ssid" type="text" inputmode="text" autocapitalize="none" autocomplete="off" required />
+            <label for="psk">Passphrase</label>
+            <input id="psk" name="psk" type="password" inputmode="text" autocapitalize="none" autocomplete="off" required />
+            <button type="submit">Save and Connect</button>
+          </form>
+          <script>
+            function fillSSID(sel) {
+              var val = sel.value;
+              document.getElementById('ssid').value = val === '__custom__' ? '' : val;
+            }
+          </script>
+        </main>
+        """
 
-    {:close, %{"Content-Type" => "text/html"}, render_html(body)}
+        {:close, %{"Content-Type" => "text/html"}, render_html(body)}
+
+      :post ->
+        %{body: body} = req
+        params = parse_form_body(body)
+        :io.format("HTTP post params: ~p~n", [params])
+        {:ok, config} = WifiWiz.Config.put(params.ssid, params.psk)
+
+        body = """
+        <section class="card">
+          <h2>Connecting to #{Map.get(config, :ssid)}...</h2>
+          <p>Your credentials were received. Attempting to join the network now.</p>
+          <p>The device may reboot or reconnect shortly. Feel free to close this tab.</p>
+        </section>
+        <script>
+          setTimeout(()=>{
+           window.close()
+          }, 5500)
+        </script>
+        """
+
+        spawn(fn ->
+          Process.sleep(5000)
+          :esp.restart()
+        end)
+
+        {:close, %{"Content-Type" => "text/html"}, render_html(body)}
+
+      _ ->
+        {:error, :internal_server_error}
+    end
   end
 
-  def handle_http_req(_req, _state) do
-    {:error, :internal_server_error}
-  end
-
-  # decode application/x-www-form-urlencoded payloads into a map without URI helpers
-  def parse_form_body(body) do
-    body
-    |> :binary.split("&")
-    |> Enum.reduce(%{}, fn
+  defp parse_form_body(body) do
+    :lists.foldl(fn
       "ssid=" <> ssid, acc -> Map.put(acc, :ssid, ssid)
       "psk=" <> psk, acc -> Map.put(acc, :psk, psk)
       _, acc -> acc
-    end)
+    end, %{}, :binary.split(body, "&"))
   end
 
   defp escape_html(binary) when is_binary(binary) do

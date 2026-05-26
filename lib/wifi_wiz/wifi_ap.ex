@@ -99,26 +99,45 @@ defmodule WifiWiz.Ap do
         spawn(fn -> WifiWiz.DNS.start() end)
 
         spawn(fn ->
-          Process.sleep(500)
+          Process.sleep(2000)
+
+          IO.puts("WifiWiz: scanning...")
+          scan_result = :network.wifi_scan([{:results, 10}, {:dwell, 300}])
 
           networks =
-            case :network.wifi_scan() do
-              {:ok, {_num, nets}} -> nets
-              _ -> []
+            case scan_result do
+              {:ok, {_num, nets}} ->
+                IO.puts("WifiWiz: got #{_num} nets")
+                nets
+              _other ->
+                IO.puts("WifiWiz: scan fail")
+                []
             end
 
-          sorted =
+          filtered = :lists.filter(
+            fn net -> Map.get(net, :ssid, "") != "" end,
             networks
-            |> Enum.filter(&(Map.get(&1, :ssid, "") != ""))
-            |> Enum.sort_by(&Map.get(&1, :rssi, -100), :desc)
-            |> Enum.reduce([], fn net, acc ->
-              if Enum.any?(acc, &(Map.get(&1, :ssid) == Map.get(net, :ssid))) do
-                acc
-              else
-                [net | acc]
+          )
+          sorted = :lists.sort(
+            fn a, b -> Map.get(a, :rssi, -100) >= Map.get(b, :rssi, -100) end,
+            filtered
+          )
+          deduped = :lists.foldl(
+            fn net, acc ->
+              ssid = Map.get(net, :ssid)
+              case :lists.any(fn n -> Map.get(n, :ssid) == ssid end, acc) do
+                true -> acc
+                false -> [net | acc]
               end
-            end)
-            |> Enum.reverse()
+            end,
+            [],
+            sorted
+          )
+          sorted = :lists.reverse(deduped)
+
+          :lists.foreach(fn net ->
+            IO.puts("SSID: #{Map.get(net, :ssid, "")} RSSI: #{Map.get(net, :rssi, 0)}")
+          end, sorted)
 
           WifiWiz.CaptiveHTTP.start(sorted)
         end)
