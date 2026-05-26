@@ -96,11 +96,34 @@ defmodule WifiWiz.Ap do
       psk: psk,
       ap_started: fn ->
         IO.puts("WifiWiz.AP Started ")
-        # spawn dns + http services
         spawn(fn -> WifiWiz.DNS.start() end)
-        spawn(fn -> WifiWiz.CaptiveHTTP.start() end)
-        ap_started.()
 
+        spawn(fn ->
+          Process.sleep(500)
+
+          networks =
+            case :network.wifi_scan() do
+              {:ok, {_num, nets}} -> nets
+              _ -> []
+            end
+
+          sorted =
+            networks
+            |> Enum.filter(&(Map.get(&1, :ssid, "") != ""))
+            |> Enum.sort_by(&Map.get(&1, :rssi, -100), :desc)
+            |> Enum.reduce([], fn net, acc ->
+              if Enum.any?(acc, &(Map.get(&1, :ssid) == Map.get(net, :ssid))) do
+                acc
+              else
+                [net | acc]
+              end
+            end)
+            |> Enum.reverse()
+
+          WifiWiz.CaptiveHTTP.start(sorted)
+        end)
+
+        ap_started.()
       end,
       sta_connected: fn mac ->
         IO.puts("STA connected with mac #{inspect(mac)}")
@@ -114,7 +137,8 @@ defmodule WifiWiz.Ap do
     ]
 
     [
-      ap: ap_config
+      ap: ap_config,
+      sta: [:managed]
     ]
   end
 end

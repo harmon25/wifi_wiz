@@ -23,8 +23,8 @@ defmodule WifiWiz.DNS do
 
   defp spoof_dns_response(query, ip) do
     <<id::binary-size(2), _flags::binary-size(2), qdcount::binary-size(2),
-      _ancount::binary-size(2), nscount::binary-size(2), arcount::binary-size(2),
-      rest::binary>> = query
+      _ancount::binary-size(2), nscount::binary-size(2), arcount::binary-size(2), rest::binary>> =
+      query
 
     # Very naive implementation: only responds with an A record with our IP
     question = rest

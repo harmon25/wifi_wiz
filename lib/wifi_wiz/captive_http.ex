@@ -4,21 +4,13 @@ defmodule WifiWiz.CaptiveHTTP do
   """
   @page_title "Wifi Setup"
 
-  def start(port \\ 80) do
+  def start(scan_results, port \\ 80) do
     config = [
       {[],
        %{
-         handler: __MODULE__
+         handler: __MODULE__,
+         scan_results: scan_results
        }}
-      # cannot seem to get the file handler to work - it does not find the file from priv
-      # think i am missing something here for elixir
-      # {[],
-      #  %{
-      #    handler: :httpd_file_handler,
-      #    handler_config: %{
-      #      app: :wifi_wiz
-      #    }
-      #  }}
     ]
 
     IO.puts("Starting httpd on port #{port}")
@@ -36,21 +28,42 @@ defmodule WifiWiz.CaptiveHTTP do
   end
 
   def init_handler(suffix, config) do
-    {:ok, %{path_suffix: suffix, config: config}}
+    {:ok, %{path_suffix: suffix, scan_results: config[:scan_results] || []}}
   end
 
-  def handle_http_req(%{method: :get} = _req, _state) do
+  def handle_http_req(%{method: :get} = _req, state) do
+    options =
+      (state[:scan_results] || [])
+      |> Enum.map(fn net ->
+        ssid = escape_html(Map.get(net, :ssid, ""))
+        rssi = Map.get(net, :rssi, 0)
+        ~s[<option value="#{ssid}">#{ssid} (#{rssi} dBm)</option>]
+      end)
+      |> Enum.join("\n      ")
+
     body = """
     <main class="card">
       <h1>AtomVM Wi-Fi Setup</h1>
-      <p>Enter your network SSID and passphrase to bring this device online.</p>
+      <p>Select or enter your network SSID and passphrase.</p>
       <form method="POST" action="/save">
+        <label for="network-select">Available networks</label>
+        <select id="network-select" onchange="fillSSID(this)">
+          <option value="">-- Select a network --</option>
+          #{options}
+          <option value="__custom__">Custom network...</option>
+        </select>
         <label for="ssid">Network SSID</label>
         <input id="ssid" name="ssid" type="text" inputmode="text" autocapitalize="none" autocomplete="off" required />
         <label for="psk">Passphrase</label>
         <input id="psk" name="psk" type="password" inputmode="text" autocapitalize="none" autocomplete="off" required />
         <button type="submit">Save and Connect</button>
       </form>
+      <script>
+        function fillSSID(sel) {
+          var val = sel.value;
+          document.getElementById('ssid').value = val === '__custom__' ? '' : val;
+        }
+      </script>
     </main>
     """
 
@@ -104,6 +117,16 @@ defmodule WifiWiz.CaptiveHTTP do
       _, acc -> acc
     end)
   end
+
+  defp escape_html(binary) when is_binary(binary) do
+    binary
+    |> :binary.replace("&", "&amp;", [:global])
+    |> :binary.replace("<", "&lt;", [:global])
+    |> :binary.replace(">", "&gt;", [:global])
+    |> :binary.replace(~S("), ~S(&quot;), [:global])
+  end
+
+  defp escape_html(_), do: ""
 
   defp render_html(contents, title \\ @page_title) do
     """
