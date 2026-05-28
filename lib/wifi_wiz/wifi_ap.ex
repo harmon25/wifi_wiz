@@ -67,28 +67,10 @@ defmodule WifiWiz.Ap do
   end
 
   defp start_sta(config, max_ms, base_ms, cap_ms, on_exhausted, attempt, elapsed) do
-    case :network.start(config) do
-      {:ok, _pid} ->
-        :io.format("Network started, waiting for STA~n")
-
-        case :network.wait_for_sta(config[:sta]) do
-          {:ok, {ip, _mask, _gateway}} ->
-            :io.format("Got ~p~n", [ip])
-            Process.sleep(:infinity)
-
-          {:error, reason} ->
-            :io.format("wait_for_sta failed: ~p~n", [reason])
-            # Scan while network is still up to check if saved SSID exists
-            if attempt < 3 do
-              log_ssid_visible(config[:sta][:ssid])
-            end
-
-            :network.stop()
-            backoff = backoff_ms(attempt, base_ms, cap_ms)
-            :io.format("Retry in ~ps~n", [div(backoff, 1000)])
-            Process.sleep(backoff)
-            start_sta(config, max_ms, base_ms, cap_ms, on_exhausted, attempt + 1, elapsed + backoff)
-        end
+    case :network.wait_for_sta(config[:sta]) do
+      {:ok, {ip, _mask, _gateway}} ->
+        :io.format("Got ~p~n", [ip])
+        Process.sleep(:infinity)
 
       {:error, {:already_started, _pid}} ->
         :io.format("WiFi already started, stopping and retrying~n")
@@ -97,9 +79,19 @@ defmodule WifiWiz.Ap do
         start_sta(config, max_ms, base_ms, cap_ms, on_exhausted, attempt, elapsed + 1000)
 
       {:error, reason} ->
-        :io.format("network.start failed: ~p~n", [reason])
+        :io.format("Attempt ~p failed (~p), retry in ~ps~n", [
+          attempt + 1,
+          reason,
+          div(backoff_ms(attempt, base_ms, cap_ms), 1000)
+        ])
+
+        # Scan while the network is still up (first 3 attempts only)
+        if attempt < 3 do
+          log_ssid_visible(config[:sta][:ssid])
+        end
+
+        :network.stop()
         backoff = backoff_ms(attempt, base_ms, cap_ms)
-        :io.format("Retry in ~ps~n", [div(backoff, 1000)])
         Process.sleep(backoff)
         start_sta(config, max_ms, base_ms, cap_ms, on_exhausted, attempt + 1, elapsed + backoff)
     end
