@@ -5,6 +5,8 @@ defmodule WifiWiz.Ap do
   WIP - captive portal - to allow updating wifi credentials for STA mode
   """
 
+  @compile {:no_warn_undefined, [:avm_pubsub]}
+
   @default_sta_retry [
     max_duration_ms: 600_000,
     backoff_base_ms: 5_000,
@@ -33,9 +35,11 @@ defmodule WifiWiz.Ap do
     nvs_config = WifiWiz.Config.get()
 
     if nvs_config[:ssid] !== "" and nvs_config[:psk] !== "" do
+      :avm_pubsub.pub(:pubsub, :wifi_status, :connecting)
       config = create_sta_config(nvs_config)
       start_sta(config, sta_retry_opts)
     else
+      :avm_pubsub.pub(:pubsub, :wifi_status, :ap_mode)
       cbs = Keyword.take(ap_opts, [:ap_started])
 
       create_ap_config(ap_opts[:ssid], ap_opts[:psk], cbs)
@@ -127,6 +131,7 @@ defmodule WifiWiz.Ap do
         end,
         got_ip: fn {ip, _netmask, gateway} ->
           :io.format("Got ~p from ~p~n", [ip, gateway])
+          :avm_pubsub.pub(:pubsub, :wifi_status, :connected)
         end,
         disconnected: fn ->
           IO.puts("Disconnected — rebooting to retry")
@@ -158,6 +163,7 @@ defmodule WifiWiz.Ap do
       ssid: ssid,
       psk: psk,
       ap_started: fn ->
+        :avm_pubsub.pub(:pubsub, :wifi_status, :ap_mode)
         IO.puts("WifiWiz.AP Started ")
         spawn(fn -> WifiWiz.DNS.start() end)
 
