@@ -5,55 +5,97 @@ defmodule WifiWiz.Ap do
   WIP - captive portal - to allow updating wifi credentials for STA mode
   """
 
+  @default_sta_retry [
+    max_duration_ms: 600_000,
+    backoff_base_ms: 5_000,
+    backoff_cap_ms: 30_000,
+    on_exhausted: :wipe_and_reboot
+  ]
+
   @doc """
   Wifi configuration helper
 
   If there are no saved wifi credentials an AP is booted up
   serving a captive portal to enter your wifi credentials
+
+  ## Options
+
+    * `:ap` - Access point configuration keyword list (passed through)
+    * `:sta_retry` - STA retry configuration keyword list:
+      * `:max_duration_ms` - total time to keep retrying before giving up (default: 600_000)
+      * `:backoff_base_ms` - delay for first retry, doubles each attempt (default: 5_000)
+      * `:backoff_cap_ms` - maximum per-retry delay (default: 30_000)
+      * `:on_exhausted` - `:wipe_and_reboot` (default) or `:return_error`
   """
   def start(opts) do
     ap_opts = Keyword.get(opts, :ap)
-    #  WifiWiz.Config.reset()
-    # if we have persisted ssid + psk connect as sta, do not run ap.
+    sta_retry_opts = Keyword.get(opts, :sta_retry, [])
     nvs_config = WifiWiz.Config.get()
 
     if nvs_config[:ssid] !== "" and nvs_config[:psk] !== "" do
-      create_sta_config(nvs_config)
-      |> start_sta()
+      config = create_sta_config(nvs_config)
+      start_sta(config, sta_retry_opts)
     else
       cbs = Keyword.take(ap_opts, [:ap_started])
 
-      # no persisted config - run ap to collect creds
       create_ap_config(ap_opts[:ssid], ap_opts[:psk], cbs)
       |> start_ap()
     end
   end
 
-  defp start_sta(config, retries \\ 3) do
-    case :network.wait_for_sta(config[:sta]) do
-      {:ok, {ip, _mask, _gateway}} ->
-        IO.puts("Got #{inspect(ip)}")
-        # keep this process alive so AtomVM doesn't reclaim network resources
-        Process.sleep(:infinity)
+  defp start_sta(config, sta_retry_opts) do
+    retry = Keyword.merge(@default_sta_retry, sta_retry_opts)
+    start_sta(config, retry[:max_duration_ms], retry[:backoff_base_ms], retry[:backoff_cap_ms],
+      retry[:on_exhausted], 0, 0)
+  end
 
-      {:error, reason} when retries > 0 ->
-        IO.puts("STA failed (#{reason}), #{retries - 1} retries left")
-        Process.sleep(3000)
-        start_sta(config, retries - 1)
+  defp start_sta(_config, max_ms, _base_ms, _cap_ms, on_exhausted, _attempt, elapsed)
+       when elapsed >= max_ms do
+    IO.puts("STA retry exhausted after #{div(elapsed, 1000)}s")
 
-      {:error, reason} ->
-        IO.puts("STA failed #{reason} after 3 tries, clearing creds + rebooting")
+    case on_exhausted do
+      :return_error ->
+        Process.sleep(100)
+        {:error, :sta_exhausted}
+
+      :wipe_and_reboot ->
+        IO.puts("Clearing creds + rebooting")
         WifiWiz.Config.reset()
         Process.sleep(5000)
         :esp.restart()
     end
   end
 
-  defp start_ap(config) do
+  defp start_sta(config, max_ms, base_ms, cap_ms, on_exhausted, attempt, elapsed) do
+    case :network.wait_for_sta(config[:sta]) do
+      {:ok, {ip, _mask, _gateway}} ->
+        IO.puts("Got #{inspect(ip)}")
+        Process.sleep(:infinity)
+
+      {:error, reason} ->
+        backoff = backoff_ms(attempt, base_ms, cap_ms)
+        IO.puts("Attempt #{attempt + 1} failed (#{reason}), retry in #{div(backoff, 1000)}s")
+        Process.sleep(backoff)
+        start_sta(config, max_ms, base_ms, cap_ms, on_exhausted, attempt + 1, elapsed + backoff)
+    end
+  end
+
+  defp backoff_ms(0, base, _cap), do: base
+  defp backoff_ms(1, base, _cap), do: base * 2
+  defp backoff_ms(2, base, _cap), do: base * 4
+
+  defp backoff_ms(_attempt, _base, cap) do
+    cap
+  end
+
+  @doc """
+  Start AP mode with the given config. Blocks indefinitely.
+  Useful as a fallback when STA retries are exhausted.
+  """
+  def start_ap(config) do
     case :network.start(config) do
       {:ok, _pid} ->
         IO.puts("AP Network started! - waiting for credentials")
-        # this blocks indefinitely - wait until connected before moving onto to user code
         Process.sleep(:infinity)
 
       error ->
@@ -90,7 +132,10 @@ defmodule WifiWiz.Ap do
     ]
   end
 
-  defp create_ap_config(ssid, psk, callbacks) do
+  @doc """
+  Build the AP + managed STA config tuple for `:network.start/1`.
+  """
+  def create_ap_config(ssid, psk, callbacks) do
     ap_started = callbacks[:ap_started] || fn -> :ok end
 
     ap_config = [
