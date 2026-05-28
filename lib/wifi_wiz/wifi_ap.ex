@@ -73,9 +73,10 @@ defmodule WifiWiz.Ap do
         Process.sleep(:infinity)
 
       {:error, {:already_started, _pid}} ->
-        :io.format("WiFi already started, waiting for connection~n")
-        Process.sleep(2000)
-        start_sta(config, max_ms, base_ms, cap_ms, on_exhausted, attempt, elapsed + 2000)
+        :io.format("WiFi already started, stopping and retrying~n")
+        :network.stop()
+        Process.sleep(1000)
+        start_sta(config, max_ms, base_ms, cap_ms, on_exhausted, attempt, elapsed + 1000)
 
       {:error, reason} ->
         backoff = backoff_ms(attempt, base_ms, cap_ms)
@@ -101,6 +102,10 @@ defmodule WifiWiz.Ap do
     case :network.start(config) do
       {:ok, _pid} ->
         IO.puts("AP Network started! - waiting for credentials")
+        Process.sleep(:infinity)
+
+      {:error, {:already_started, _pid}} ->
+        IO.puts("AP already running, blocking")
         Process.sleep(:infinity)
 
       error ->
