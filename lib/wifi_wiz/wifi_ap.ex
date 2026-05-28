@@ -72,6 +72,11 @@ defmodule WifiWiz.Ap do
         :io.format("Got ~p~n", [ip])
         Process.sleep(:infinity)
 
+      {:error, {:already_started, _pid}} ->
+        :io.format("WiFi already started, waiting for connection~n")
+        Process.sleep(2000)
+        start_sta(config, max_ms, base_ms, cap_ms, on_exhausted, attempt, elapsed + 2000)
+
       {:error, reason} ->
         backoff = backoff_ms(attempt, base_ms, cap_ms)
         :io.format("Attempt ~p failed (~p), retry in ~ps~n", [attempt + 1, reason, div(backoff, 1000)])
