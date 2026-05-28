@@ -68,9 +68,9 @@ defmodule WifiWiz.Ap do
 
   defp start_sta(config, max_ms, base_ms, cap_ms, on_exhausted, attempt, elapsed) do
     case :network.wait_for_sta(config[:sta]) do
-      {:ok, {ip, _mask, _gateway}} ->
+      {:ok, {ip, mask, gateway}} ->
         :io.format("Got ~p~n", [ip])
-        Process.sleep(:infinity)
+        {:ok, {ip, mask, gateway}}
 
       {:error, {:already_started, _pid}} ->
         :io.format("WiFi already started, stopping and retrying~n")
