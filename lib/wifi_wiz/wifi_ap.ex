@@ -131,7 +131,6 @@ defmodule WifiWiz.Ap do
         end,
         got_ip: fn {ip, _netmask, gateway} ->
           :io.format("Got ~p from ~p~n", [ip, gateway])
-          :avm_pubsub.pub(:pubsub, :wifi_status, :connected)
         end,
         disconnected: fn ->
           IO.puts("Disconnected — rebooting to retry")
