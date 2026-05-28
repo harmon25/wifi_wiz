@@ -85,31 +85,10 @@ defmodule WifiWiz.Ap do
           div(backoff_ms(attempt, base_ms, cap_ms), 1000)
         ])
 
-        # Scan while the network is still up (first 3 attempts only)
-        if attempt < 3 do
-          log_ssid_visible(config[:sta][:ssid])
-        end
-
         :network.stop()
         backoff = backoff_ms(attempt, base_ms, cap_ms)
         Process.sleep(backoff)
         start_sta(config, max_ms, base_ms, cap_ms, on_exhausted, attempt + 1, elapsed + backoff)
-    end
-  end
-
-  defp log_ssid_visible(target_ssid) do
-    case :network.wifi_scan([{:results, 20}, {:dwell, 100}]) do
-      {:ok, {_num, nets}} ->
-        found = :lists.any(fn net -> Map.get(net, :ssid, "") == target_ssid end, nets)
-
-        if found do
-          :io.format("Scan: SSID ~s visible~n", [target_ssid])
-        else
-          :io.format("Scan: SSID ~s NOT visible~n", [target_ssid])
-        end
-
-      error ->
-        :io.format("Scan failed: ~p~n", [error])
     end
   end
 
