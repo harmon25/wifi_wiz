@@ -13,7 +13,7 @@ defmodule WifiWiz.CaptiveHTTP do
        }}
     ]
 
-    IO.puts("Starting httpd on port #{port}")
+    :io.format("Starting httpd on port ~p~n", [port])
 
     case AtomvmHttpd.start(port, config) do
       {:ok, pid} ->
@@ -43,7 +43,8 @@ defmodule WifiWiz.CaptiveHTTP do
     ssid = escape_html(Map.get(net, :ssid, ""))
     rssi = Map.get(net, :rssi, 0)
     :io.format("HTTP option ssid=~s rssi=~p~n", [ssid, rssi])
-    opt_lines(rest, [~s[<option value="#{ssid}">#{ssid} (#{rssi} dBm)</option>] | acc])
+    opt = :erlang.iolist_to_binary(:io_lib.format("<option value=\"~s\">~s (~p dBm)</option>", [ssid, ssid, rssi]))
+    opt_lines(rest, [opt | acc])
   end
 
   defp join_lines([]), do: ""

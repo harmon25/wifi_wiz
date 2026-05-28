@@ -4,7 +4,7 @@ defmodule WifiWiz.Demo do
     # can launch http servers or other network services right after.
     {:ok, {ip, _, _}} = WifiWiz.start()
 
-    IO.puts("Wifi Connected with Ip: #{inspect(ip)}!\nDo Stuff Here...")
+    :io.format("Wifi Connected with Ip: ~p!~nDo Stuff Here...~n", [ip])
 
     :ok
   end

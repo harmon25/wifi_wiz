@@ -51,7 +51,7 @@ defmodule WifiWiz.Ap do
 
   defp start_sta(_config, max_ms, _base_ms, _cap_ms, on_exhausted, _attempt, elapsed)
        when elapsed >= max_ms do
-    IO.puts("STA retry exhausted after #{div(elapsed, 1000)}s")
+    :io.format("STA retry exhausted after ~ps~n", [div(elapsed, 1000)])
 
     case on_exhausted do
       :return_error ->
@@ -69,12 +69,12 @@ defmodule WifiWiz.Ap do
   defp start_sta(config, max_ms, base_ms, cap_ms, on_exhausted, attempt, elapsed) do
     case :network.wait_for_sta(config[:sta]) do
       {:ok, {ip, _mask, _gateway}} ->
-        IO.puts("Got #{inspect(ip)}")
+        :io.format("Got ~p~n", [ip])
         Process.sleep(:infinity)
 
       {:error, reason} ->
         backoff = backoff_ms(attempt, base_ms, cap_ms)
-        IO.puts("Attempt #{attempt + 1} failed (#{reason}), retry in #{div(backoff, 1000)}s")
+        :io.format("Attempt ~p failed (~p), retry in ~ps~n", [attempt + 1, reason, div(backoff, 1000)])
         Process.sleep(backoff)
         start_sta(config, max_ms, base_ms, cap_ms, on_exhausted, attempt + 1, elapsed + backoff)
     end
@@ -107,10 +107,10 @@ defmodule WifiWiz.Ap do
     sta_config =
       [
         connected: fn ->
-          IO.puts("Connected to #{nvs_config[:ssid]}")
+          :io.format("Connected to ~s~n", [nvs_config[:ssid]])
         end,
         got_ip: fn {ip, _netmask, gateway} ->
-          IO.puts("Got #{inspect(ip)} from #{inspect(gateway)}")
+          :io.format("Got ~p from ~p~n", [ip, gateway])
         end,
         disconnected: fn ->
           IO.puts("Disconnected — rebooting to retry")
@@ -154,7 +154,7 @@ defmodule WifiWiz.Ap do
           networks =
             case scan_result do
               {:ok, {num, nets}} ->
-                IO.puts("WifiWiz: got #{num} nets")
+                :io.format("WifiWiz: got ~p nets~n", [num])
                 nets
 
               _other ->
@@ -192,7 +192,7 @@ defmodule WifiWiz.Ap do
 
           :lists.foreach(
             fn net ->
-              IO.puts("SSID: #{Map.get(net, :ssid, "")} RSSI: #{Map.get(net, :rssi, 0)}")
+              :io.format("SSID: ~s RSSI: ~p~n", [Map.get(net, :ssid, ""), Map.get(net, :rssi, 0)])
             end,
             sorted
           )
@@ -203,13 +203,13 @@ defmodule WifiWiz.Ap do
         ap_started.()
       end,
       sta_connected: fn mac ->
-        IO.puts("STA connected with mac #{inspect(mac)}")
+        :io.format("STA connected with mac ~p~n", [mac])
       end,
       sta_ip_assigned: fn ip ->
-        IO.puts("STA assigned address #{inspect(ip)}")
+        :io.format("STA assigned address ~p~n", [ip])
       end,
       sta_disconnected: fn mac ->
-        IO.puts("STA disconnected with mac #{inspect(mac)}")
+        :io.format("STA disconnected with mac ~p~n", [mac])
       end
     ]
 
