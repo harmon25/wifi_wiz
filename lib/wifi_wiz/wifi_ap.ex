@@ -150,14 +150,14 @@ defmodule WifiWiz.Ap do
         nvs_config
 
     if snmp_host do
-      snpm_config = [
+      snmp_conf = [
         host: snmp_host,
         synchronized: fn {tv_sec, tv_usec} ->
           IO.inspect("Synchronized time with SNTP server. tv_sec=#{tv_sec} tv_usec=#{tv_usec}")
         end
       ]
 
-      [sta: sta_config, snmp: snmp_config]
+      [sta: sta_config, snmp: snmp_conf]
     else
       [sta: sta_config]
     end
