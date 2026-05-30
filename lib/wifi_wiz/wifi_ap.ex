@@ -31,12 +31,13 @@ defmodule WifiWiz.Ap do
   """
   def start(opts) do
     ap_opts = Keyword.get(opts, :ap)
+    snmp_host = Keyword.get(opts, :snmp_host, "time-d-b.nist.gov")
     sta_retry_opts = Keyword.get(opts, :sta_retry, [])
     nvs_config = WifiWiz.Config.get()
 
     if nvs_config[:ssid] !== "" and nvs_config[:psk] !== "" do
       :avm_pubsub.pub(:pubsub, :wifi_status, :connecting)
-      config = create_sta_config(nvs_config)
+      config = create_sta_config(nvs_config, snmp_host)
       start_sta(config, sta_retry_opts)
     else
       :avm_pubsub.pub(:pubsub, :wifi_status, :ap_mode)
@@ -49,8 +50,16 @@ defmodule WifiWiz.Ap do
 
   defp start_sta(config, sta_retry_opts) do
     retry = Keyword.merge(@default_sta_retry, sta_retry_opts)
-    start_sta(config, retry[:max_duration_ms], retry[:backoff_base_ms], retry[:backoff_cap_ms],
-      retry[:on_exhausted], 0, 0)
+
+    start_sta(
+      config,
+      retry[:max_duration_ms],
+      retry[:backoff_base_ms],
+      retry[:backoff_cap_ms],
+      retry[:on_exhausted],
+      0,
+      0
+    )
   end
 
   defp start_sta(_config, max_ms, _base_ms, _cap_ms, on_exhausted, _attempt, elapsed)
@@ -123,7 +132,7 @@ defmodule WifiWiz.Ap do
     end
   end
 
-  defp create_sta_config(nvs_config) do
+  defp create_sta_config(nvs_config, snmp_host) do
     sta_config =
       [
         connected: fn ->
@@ -140,17 +149,18 @@ defmodule WifiWiz.Ap do
       ] ++
         nvs_config
 
-    # snpm_config = [
-    #   host: "time-d-b.nist.gov",
-    #   synchronized: fn {tv_sec, tv_usec} ->
-    #     IO.inspect("Synchronized time with SNTP server. tv_sec=#{tv_sec} tv_usec=#{tv_usec}")
-    #   end
-    # ]
+    if snmp_host do
+      snpm_config = [
+        host: snmp_host,
+        synchronized: fn {tv_sec, tv_usec} ->
+          IO.inspect("Synchronized time with SNTP server. tv_sec=#{tv_sec} tv_usec=#{tv_usec}")
+        end
+      ]
 
-    [
-      sta: sta_config
-      # snpm: snpm_config
-    ]
+      [sta: sta_config, snmp: snmp_config]
+    else
+      [sta: sta_config]
+    end
   end
 
   @doc """
