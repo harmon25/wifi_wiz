@@ -4,12 +4,14 @@ defmodule WifiWiz.CaptiveHTTP do
   Designed for severe RAM constraints (ESP32-C3 / AtomVM).
   """
 
-  def start(scan_results, port \\ 80) do
+  @compile {:no_warn_undefined, [:avm_pubsub]}
+
+  def start(scan_results, pubsub_channel, port \\ 80) do
     config = [
       {[],
        %{
          handler: __MODULE__,
-         handler_config: %{scan_results: scan_results}
+         handler_config: %{scan_results: scan_results, pubsub_channel: pubsub_channel}
        }}
     ]
 
@@ -33,7 +35,9 @@ defmodule WifiWiz.CaptiveHTTP do
         r -> r
       end
 
-    {:ok, %{path_suffix: suffix, scan_results: results}}
+    pubsub_channel = Map.get(config, :pubsub_channel, :pubsub)
+
+    {:ok, %{path_suffix: suffix, scan_results: results, pubsub_channel: pubsub_channel}}
   end
 
   # Build option iolists — never creates intermediate concatenated binaries.
@@ -96,6 +100,8 @@ defmodule WifiWiz.CaptiveHTTP do
         :io.format("HTTP post params: ~p~n", [params])
         {:ok, config} = WifiWiz.Config.put(params.ssid, params.psk)
         saved_ssid = :proplists.get_value(:ssid, config)
+        pubsub_channel = Map.get(state, :pubsub_channel, :pubsub)
+        :avm_pubsub.pub(pubsub_channel, [:wifi_wiz, :wifi_status], {:credentials_saved, saved_ssid})
 
         body = [
           "<h2>Saved</h2>",

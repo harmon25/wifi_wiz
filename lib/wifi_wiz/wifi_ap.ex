@@ -23,6 +23,7 @@ defmodule WifiWiz.Ap do
   ## Options
 
     * `:ap` - Access point configuration keyword list (passed through)
+    * `:pubsub` - Atom name of the pubsub channel to publish status events on (default: `:pubsub`)
     * `:sta_retry` - STA retry configuration keyword list:
       * `:max_duration_ms` - total time to keep retrying before giving up (default: 600_000)
       * `:backoff_base_ms` - delay for first retry, doubles each attempt (default: 5_000)
@@ -31,24 +32,25 @@ defmodule WifiWiz.Ap do
   """
   def start(opts) do
     ap_opts = Keyword.get(opts, :ap)
+    pubsub_channel = Keyword.get(opts, :pubsub, :pubsub)
     snmp_host = Keyword.get(opts, :snmp_host, "time-d-b.nist.gov")
     sta_retry_opts = Keyword.get(opts, :sta_retry, [])
     nvs_config = WifiWiz.Config.get()
 
     if nvs_config[:ssid] !== "" and nvs_config[:psk] !== "" do
-      :avm_pubsub.pub(:pubsub, :wifi_status, :connecting)
-      config = create_sta_config(nvs_config, snmp_host)
-      start_sta(config, sta_retry_opts)
+      :avm_pubsub.pub(pubsub_channel, [:wifi_wiz, :wifi_status], :connecting)
+      config = create_sta_config(nvs_config, snmp_host, pubsub_channel)
+      start_sta(config, sta_retry_opts, pubsub_channel)
     else
-      :avm_pubsub.pub(:pubsub, :wifi_status, :ap_mode)
+      :avm_pubsub.pub(pubsub_channel, [:wifi_wiz, :wifi_status], :ap_mode)
       cbs = Keyword.take(ap_opts, [:ap_started])
 
-      create_ap_config(ap_opts[:ssid], ap_opts[:psk], cbs)
+      create_ap_config(ap_opts[:ssid], ap_opts[:psk], cbs, pubsub_channel)
       |> start_ap()
     end
   end
 
-  defp start_sta(config, sta_retry_opts) do
+  defp start_sta(config, sta_retry_opts, pubsub_channel) do
     retry = Keyword.merge(@default_sta_retry, sta_retry_opts)
 
     start_sta(
@@ -57,14 +59,16 @@ defmodule WifiWiz.Ap do
       retry[:backoff_base_ms],
       retry[:backoff_cap_ms],
       retry[:on_exhausted],
+      pubsub_channel,
       0,
       0
     )
   end
 
-  defp start_sta(_config, max_ms, _base_ms, _cap_ms, on_exhausted, _attempt, elapsed)
+  defp start_sta(_config, max_ms, _base_ms, _cap_ms, on_exhausted, pubsub_channel, _attempt, elapsed)
        when elapsed >= max_ms do
     :io.format("STA retry exhausted after ~ps~n", [div(elapsed, 1000)])
+    :avm_pubsub.pub(pubsub_channel, [:wifi_wiz, :wifi_status], :sta_exhausted)
 
     case on_exhausted do
       :return_error ->
@@ -79,7 +83,7 @@ defmodule WifiWiz.Ap do
     end
   end
 
-  defp start_sta(config, max_ms, base_ms, cap_ms, on_exhausted, attempt, elapsed) do
+  defp start_sta(config, max_ms, base_ms, cap_ms, on_exhausted, pubsub_channel, attempt, elapsed) do
     case :network.wait_for_sta(config[:sta]) do
       {:ok, {ip, mask, gateway}} ->
         :io.format("Got ~p~n", [ip])
@@ -89,19 +93,20 @@ defmodule WifiWiz.Ap do
         :io.format("WiFi already started, stopping and retrying~n")
         :network.stop()
         Process.sleep(1000)
-        start_sta(config, max_ms, base_ms, cap_ms, on_exhausted, attempt, elapsed + 1000)
+        start_sta(config, max_ms, base_ms, cap_ms, on_exhausted, pubsub_channel, attempt, elapsed + 1000)
 
       {:error, reason} ->
+        backoff = backoff_ms(attempt, base_ms, cap_ms)
         :io.format("Attempt ~p failed (~p), retry in ~ps~n", [
           attempt + 1,
           reason,
-          div(backoff_ms(attempt, base_ms, cap_ms), 1000)
+          div(backoff, 1000)
         ])
 
+        :avm_pubsub.pub(pubsub_channel, [:wifi_wiz, :wifi_status], {:sta_retry, attempt + 1, reason})
         :network.stop()
-        backoff = backoff_ms(attempt, base_ms, cap_ms)
         Process.sleep(backoff)
-        start_sta(config, max_ms, base_ms, cap_ms, on_exhausted, attempt + 1, elapsed + backoff)
+        start_sta(config, max_ms, base_ms, cap_ms, on_exhausted, pubsub_channel, attempt + 1, elapsed + backoff)
     end
   end
 
@@ -132,7 +137,7 @@ defmodule WifiWiz.Ap do
     end
   end
 
-  defp create_sta_config(nvs_config, snmp_host) do
+  defp create_sta_config(nvs_config, snmp_host, pubsub_channel) do
     sta_config =
       [
         connected: fn ->
@@ -140,11 +145,12 @@ defmodule WifiWiz.Ap do
         end,
         got_ip: fn {ip, _netmask, gateway} ->
           :io.format("Got ~p from ~p~n", [ip, gateway])
-          spawn(fn -> :avm_pubsub.pub(:pubsub, :wifi_status, :connected) end)
+          :avm_pubsub.pub(pubsub_channel, [:wifi_wiz, :wifi_status], {:connected, {ip, gateway}})
         end,
         disconnected: fn ->
           IO.puts("Disconnected — rebooting to retry")
-          :esp.restart()
+          :avm_pubsub.pub(pubsub_channel, [:wifi_wiz, :wifi_status], :disconnected)
+          # :esp.restart()
         end
       ] ++
         nvs_config
@@ -166,14 +172,14 @@ defmodule WifiWiz.Ap do
   @doc """
   Build the AP + managed STA config tuple for `:network.start/1`.
   """
-  def create_ap_config(ssid, psk, callbacks) do
+  def create_ap_config(ssid, psk, callbacks, pubsub_channel) do
     ap_started = callbacks[:ap_started] || fn -> :ok end
 
     ap_config = [
       ssid: ssid,
       psk: psk,
       ap_started: fn ->
-        :avm_pubsub.pub(:pubsub, :wifi_status, :ap_mode)
+        :avm_pubsub.pub(pubsub_channel, [:wifi_wiz, :wifi_status], {:ap_mode, ssid})
         IO.puts("WifiWiz.AP Started ")
         spawn(fn -> WifiWiz.DNS.start() end)
 
@@ -229,19 +235,21 @@ defmodule WifiWiz.Ap do
             sorted
           )
 
-          WifiWiz.CaptiveHTTP.start(sorted)
+          WifiWiz.CaptiveHTTP.start(sorted, pubsub_channel)
         end)
 
         ap_started.()
       end,
       sta_connected: fn mac ->
         :io.format("STA connected with mac ~p~n", [mac])
+        :avm_pubsub.pub(pubsub_channel, [:wifi_wiz, :wifi_status], {:client_connected, mac})
       end,
       sta_ip_assigned: fn ip ->
         :io.format("STA assigned address ~p~n", [ip])
       end,
       sta_disconnected: fn mac ->
         :io.format("STA disconnected with mac ~p~n", [mac])
+        :avm_pubsub.pub(pubsub_channel, [:wifi_wiz, :wifi_status], {:client_disconnected, mac})
       end
     ]
 
