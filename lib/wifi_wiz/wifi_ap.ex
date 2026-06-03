@@ -39,7 +39,7 @@ defmodule WifiWiz.Ap do
 
     if nvs_config[:ssid] !== "" and nvs_config[:psk] !== "" do
       :avm_pubsub.pub(pubsub_channel, [:wifi_wiz, :wifi_status], :connecting)
-      config = create_sta_config(nvs_config, snmp_host, pubsub_channel)
+      config = create_sta_config(nvs_config, snmp_host, pubsub_channel, self())
       start_sta(config, sta_retry_opts, pubsub_channel)
     else
       :avm_pubsub.pub(pubsub_channel, [:wifi_wiz, :wifi_status], :ap_mode)
@@ -93,10 +93,9 @@ defmodule WifiWiz.Ap do
   end
 
   defp start_sta(config, max_ms, base_ms, cap_ms, on_exhausted, pubsub_channel, attempt, elapsed) do
-    case :network.wait_for_sta(config[:sta]) do
+    case start_network_and_wait(config) do
       {:ok, {ip, mask, gateway}} ->
         :io.format("Got ~p~n", [ip])
-        :avm_pubsub.pub(pubsub_channel, [:wifi_wiz, :wifi_status], {:connected, {ip, gateway}})
 
         {:ok, {ip, mask, gateway}}
 
@@ -147,6 +146,24 @@ defmodule WifiWiz.Ap do
     end
   end
 
+  # Starts the network driver directly (bypassing wait_for_sta's shadowing of
+  # user-supplied callbacks) and blocks until the got_ip callback signals back.
+  defp start_network_and_wait(config) do
+    case :network.start(config) do
+      {:ok, _pid} ->
+        receive do
+          {:wifi_wiz_got_ip, ip, netmask, gateway} ->
+            {:ok, {ip, netmask, gateway}}
+        after
+          15_000 ->
+            {:error, :timeout}
+        end
+
+      error ->
+        error
+    end
+  end
+
   defp backoff_ms(0, base, _cap), do: base
   defp backoff_ms(1, base, _cap), do: base * 2
   defp backoff_ms(2, base, _cap), do: base * 4
@@ -174,20 +191,20 @@ defmodule WifiWiz.Ap do
     end
   end
 
-  defp create_sta_config(nvs_config, snmp_host, pubsub_channel) do
+  defp create_sta_config(nvs_config, snmp_host, pubsub_channel, caller_pid) do
     sta_config =
       [
         connected: fn ->
           :io.format("Connected to ~s~n", [nvs_config[:ssid]])
         end,
-        got_ip: fn {ip, _netmask, gateway} ->
+        got_ip: fn {ip, netmask, gateway} ->
           :io.format("Got ~p from ~p~n", [ip, gateway])
           :avm_pubsub.pub(pubsub_channel, [:wifi_wiz, :wifi_status], {:connected, {ip, gateway}})
+          send(caller_pid, {:wifi_wiz_got_ip, ip, netmask, gateway})
         end,
         disconnected: fn ->
-          IO.puts("Disconnected — rebooting to retry")
+          IO.puts("Disconnected")
           :avm_pubsub.pub(pubsub_channel, [:wifi_wiz, :wifi_status], :disconnected)
-          # :esp.restart()
         end
       ] ++
         nvs_config
