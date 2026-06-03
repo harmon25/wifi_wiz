@@ -101,7 +101,12 @@ defmodule WifiWiz.CaptiveHTTP do
         {:ok, config} = WifiWiz.Config.put(params.ssid, params.psk)
         saved_ssid = :proplists.get_value(:ssid, config)
         pubsub_channel = Map.get(state, :pubsub_channel, :pubsub)
-        :avm_pubsub.pub(pubsub_channel, [:wifi_wiz, :wifi_status], {:credentials_saved, saved_ssid})
+
+        :avm_pubsub.pub(
+          pubsub_channel,
+          [:wifi_wiz, :wifi_status],
+          {:credentials_saved, saved_ssid}
+        )
 
         body = [
           "<h2>Saved</h2>",

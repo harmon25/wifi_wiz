@@ -65,7 +65,16 @@ defmodule WifiWiz.Ap do
     )
   end
 
-  defp start_sta(_config, max_ms, _base_ms, _cap_ms, on_exhausted, pubsub_channel, _attempt, elapsed)
+  defp start_sta(
+         _config,
+         max_ms,
+         _base_ms,
+         _cap_ms,
+         on_exhausted,
+         pubsub_channel,
+         _attempt,
+         elapsed
+       )
        when elapsed >= max_ms do
     :io.format("STA retry exhausted after ~ps~n", [div(elapsed, 1000)])
     :avm_pubsub.pub(pubsub_channel, [:wifi_wiz, :wifi_status], :sta_exhausted)
@@ -87,26 +96,54 @@ defmodule WifiWiz.Ap do
     case :network.wait_for_sta(config[:sta]) do
       {:ok, {ip, mask, gateway}} ->
         :io.format("Got ~p~n", [ip])
+        :avm_pubsub.pub(pubsub_channel, [:wifi_wiz, :wifi_status], {:connected, {ip, gateway}})
+
         {:ok, {ip, mask, gateway}}
 
       {:error, {:already_started, _pid}} ->
         :io.format("WiFi already started, stopping and retrying~n")
         :network.stop()
         Process.sleep(1000)
-        start_sta(config, max_ms, base_ms, cap_ms, on_exhausted, pubsub_channel, attempt, elapsed + 1000)
+
+        start_sta(
+          config,
+          max_ms,
+          base_ms,
+          cap_ms,
+          on_exhausted,
+          pubsub_channel,
+          attempt,
+          elapsed + 1000
+        )
 
       {:error, reason} ->
         backoff = backoff_ms(attempt, base_ms, cap_ms)
+
         :io.format("Attempt ~p failed (~p), retry in ~ps~n", [
           attempt + 1,
           reason,
           div(backoff, 1000)
         ])
 
-        :avm_pubsub.pub(pubsub_channel, [:wifi_wiz, :wifi_status], {:sta_retry, attempt + 1, reason})
+        :avm_pubsub.pub(
+          pubsub_channel,
+          [:wifi_wiz, :wifi_status],
+          {:sta_retry, attempt + 1, reason}
+        )
+
         :network.stop()
         Process.sleep(backoff)
-        start_sta(config, max_ms, base_ms, cap_ms, on_exhausted, pubsub_channel, attempt + 1, elapsed + backoff)
+
+        start_sta(
+          config,
+          max_ms,
+          base_ms,
+          cap_ms,
+          on_exhausted,
+          pubsub_channel,
+          attempt + 1,
+          elapsed + backoff
+        )
     end
   end
 
