@@ -46,7 +46,6 @@ defmodule WifiWiz.CaptiveHTTP do
   defp opt_lines([net | rest], acc) do
     ssid = escape_html(Map.get(net, :ssid, ""))
     rssi = Map.get(net, :rssi, 0)
-    :io.format("HTTP option ssid=~s rssi=~p~n", [ssid, rssi])
 
     opt = [
       "<option value=\"",
@@ -79,7 +78,7 @@ defmodule WifiWiz.CaptiveHTTP do
           "<h1>WiFi Setup</h1>",
           "<form method=\"POST\" action=\"/save\">",
           "<label>Network</label>",
-          "<select name=\"ssid\" required onchange=\"document.getElementById('s').value=this.value=='__custom__'?'':this.value\">",
+          "<select onchange=\"document.getElementById('s').value=this.value=='__custom__'?'':this.value\">",
           "<option value=\"\">-- Select --</option>",
           options,
           "<option value=\"__custom__\">Custom...</option>",
@@ -131,13 +130,32 @@ defmodule WifiWiz.CaptiveHTTP do
   defp parse_form_body(body) do
     :lists.foldl(
       fn
-        "ssid=" <> ssid, acc -> Map.put(acc, :ssid, ssid)
-        "psk=" <> psk, acc -> Map.put(acc, :psk, psk)
+        "ssid=" <> ssid, acc -> Map.put(acc, :ssid, url_decode(ssid))
+        "psk=" <> psk, acc -> Map.put(acc, :psk, url_decode(psk))
         _, acc -> acc
       end,
       %{},
-      :binary.split(body, "&")
+      :binary.split(body, "&", [:global])
     )
+  end
+
+  # Minimal application/x-www-form-urlencoded decoder.
+  # Converts '+' to space, then decodes '%XX' percent-encoded sequences.
+  defp url_decode(binary) do
+    binary
+    |> :binary.replace("+", " ", [:global])
+    |> percent_decode()
+  end
+
+  defp percent_decode(<<>>), do: <<>>
+
+  defp percent_decode(<<"%", h1, h2, rest::binary>>) do
+    byte = :erlang.list_to_integer([h1, h2], 16)
+    <<byte::8, percent_decode(rest)::binary>>
+  end
+
+  defp percent_decode(<<c, rest::binary>>) do
+    <<c, percent_decode(rest)::binary>>
   end
 
   defp escape_html(binary) when is_binary(binary) do

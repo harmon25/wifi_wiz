@@ -31,7 +31,7 @@ defmodule WifiWiz.Ap do
       * `:on_exhausted` - `:wipe_and_reboot` (default) or `:return_error`
   """
   def start(opts) do
-    ap_opts = Keyword.get(opts, :ap)
+    ap_opts = Keyword.get(opts, :ap, [])
     pubsub_channel = Keyword.get(opts, :pubsub, :pubsub)
     snmp_host = Keyword.get(opts, :snmp_host, "time-d-b.nist.gov")
     sta_retry_opts = Keyword.get(opts, :sta_retry, [])
@@ -149,6 +149,8 @@ defmodule WifiWiz.Ap do
   # Starts the network driver directly (bypassing wait_for_sta's shadowing of
   # user-supplied callbacks) and blocks until the got_ip callback signals back.
   defp start_network_and_wait(config) do
+    flush_got_ip()
+
     case :network.start(config) do
       {:ok, _pid} ->
         receive do
@@ -161,6 +163,15 @@ defmodule WifiWiz.Ap do
 
       error ->
         error
+    end
+  end
+
+  # Drain any stale got_ip messages left in the mailbox from a previous attempt.
+  defp flush_got_ip() do
+    receive do
+      {:wifi_wiz_got_ip, _, _, _} -> flush_got_ip()
+    after
+      0 -> :ok
     end
   end
 
