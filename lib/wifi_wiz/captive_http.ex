@@ -96,31 +96,47 @@ defmodule WifiWiz.CaptiveHTTP do
       :post ->
         %{body: body} = req
         params = parse_form_body(body)
-        :io.format("HTTP post params: ~p~n", [params])
-        {:ok, config} = WifiWiz.Config.put(params.ssid, params.psk)
-        saved_ssid = :proplists.get_value(:ssid, config)
-        pubsub_channel = Map.get(state, :pubsub_channel, :pubsub)
+        ssid = Map.get(params, :ssid)
+        psk = Map.get(params, :psk)
 
-        :avm_pubsub.pub(
-          pubsub_channel,
-          [:wifi_wiz, :wifi_status],
-          {:credentials_saved, saved_ssid}
-        )
+        :io.format("HTTP post for ssid=~p~n", [ssid])
 
-        body = [
-          "<h2>Saved</h2>",
-          "<p>Connecting to ",
-          escape_html(saved_ssid),
-          "...</p>",
-          "<script>setTimeout(()=>window.close(),5500)</script>"
-        ]
+        cond do
+          ssid in [nil, ""] or psk in [nil, ""] ->
+            err_body = [
+              "<h2>Missing credentials</h2>",
+              "<p>SSID and password are required.</p>",
+              "<p><a href=\"/\">Try again</a></p>"
+            ]
 
-        spawn(fn ->
-          Process.sleep(5000)
-          :esp.restart()
-        end)
+            {:close, %{"Content-Type" => "text/html"}, html_page(err_body)}
 
-        {:close, %{"Content-Type" => "text/html"}, html_page(body)}
+          true ->
+            {:ok, config} = WifiWiz.Config.put(ssid, psk)
+            saved_ssid = :proplists.get_value(:ssid, config)
+            pubsub_channel = Map.get(state, :pubsub_channel, :pubsub)
+
+            :avm_pubsub.pub(
+              pubsub_channel,
+              [:wifi_wiz, :wifi_status],
+              {:credentials_saved, saved_ssid}
+            )
+
+            body = [
+              "<h2>Saved</h2>",
+              "<p>Connecting to ",
+              escape_html(saved_ssid),
+              "...</p>",
+              "<script>setTimeout(()=>window.close(),5500)</script>"
+            ]
+
+            spawn(fn ->
+              Process.sleep(5000)
+              :esp.restart()
+            end)
+
+            {:close, %{"Content-Type" => "text/html"}, html_page(body)}
+        end
 
       _ ->
         {:error, :internal_server_error}
@@ -150,8 +166,19 @@ defmodule WifiWiz.CaptiveHTTP do
   defp percent_decode(<<>>), do: <<>>
 
   defp percent_decode(<<"%", h1, h2, rest::binary>>) do
-    byte = :erlang.list_to_integer([h1, h2], 16)
-    <<byte::8, percent_decode(rest)::binary>>
+    # Malformed sequences (e.g. "%ZZ") would crash list_to_integer/2; fall back
+    # to emitting the literal bytes so user input can't take down the portal.
+    try do
+      :erlang.list_to_integer([h1, h2], 16)
+    rescue
+      _ -> :error
+    else
+      byte -> {:ok, byte}
+    end
+    |> case do
+      {:ok, byte} -> <<byte::8, percent_decode(rest)::binary>>
+      :error -> <<"%", h1, h2, percent_decode(rest)::binary>>
+    end
   end
 
   defp percent_decode(<<c, rest::binary>>) do

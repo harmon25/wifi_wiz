@@ -58,7 +58,7 @@ end
 |---|---|---|
 | `:ap` | `[ssid: "AtomVM AP", psk: "atomvm123"]` | AP mode SSID and PSK |
 | `:pubsub` | `:pubsub` | `avm_pubsub` channel atom for status events |
-| `:snmp_host` | `"time-d-b.nist.gov"` | SNTP server hostname (`nil` to disable) |
+| `:sntp_host` | `"time-d-b.nist.gov"` | SNTP time-sync server hostname (`nil` to disable) |
 | `:sta_retry` | see below | STA reconnection retry config |
 
 ### `:sta_retry` options

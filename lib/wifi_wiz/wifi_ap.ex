@@ -14,6 +14,8 @@ defmodule WifiWiz.Ap do
     on_exhausted: :wipe_and_reboot
   ]
 
+  @default_ap_config [ssid: "AtomVM AP", psk: "atomvm123"]
+
   @doc """
   Wifi configuration helper
 
@@ -22,8 +24,11 @@ defmodule WifiWiz.Ap do
 
   ## Options
 
-    * `:ap` - Access point configuration keyword list (passed through)
+    * `:ap` - Access point configuration keyword list (merged over the
+      defaults `[ssid: "AtomVM AP", psk: "atomvm123"]`)
     * `:pubsub` - Atom name of the pubsub channel to publish status events on (default: `:pubsub`)
+    * `:sntp_host` - SNTP time-sync server hostname (default: `"time-d-b.nist.gov"`,
+      `nil` to disable)
     * `:sta_retry` - STA retry configuration keyword list:
       * `:max_duration_ms` - total time to keep retrying before giving up (default: 600_000)
       * `:backoff_base_ms` - delay for first retry, doubles each attempt (default: 5_000)
@@ -31,15 +36,15 @@ defmodule WifiWiz.Ap do
       * `:on_exhausted` - `:wipe_and_reboot` (default) or `:return_error`
   """
   def start(opts) do
-    ap_opts = Keyword.get(opts, :ap, [])
+    ap_opts = Keyword.merge(@default_ap_config, Keyword.get(opts, :ap, []))
     pubsub_channel = Keyword.get(opts, :pubsub, :pubsub)
-    snmp_host = Keyword.get(opts, :snmp_host, "time-d-b.nist.gov")
+    sntp_host = Keyword.get(opts, :sntp_host, "time-d-b.nist.gov")
     sta_retry_opts = Keyword.get(opts, :sta_retry, [])
     nvs_config = WifiWiz.Config.get()
 
     if nvs_config[:ssid] !== "" and nvs_config[:psk] !== "" do
       :avm_pubsub.pub(pubsub_channel, [:wifi_wiz, :wifi_status], :connecting)
-      config = create_sta_config(nvs_config, snmp_host, pubsub_channel, self())
+      config = create_sta_config(nvs_config, sntp_host, pubsub_channel, self())
       start_sta(config, sta_retry_opts, pubsub_channel)
     else
       :avm_pubsub.pub(pubsub_channel, [:wifi_wiz, :wifi_status], :ap_mode)
@@ -202,7 +207,7 @@ defmodule WifiWiz.Ap do
     end
   end
 
-  defp create_sta_config(nvs_config, snmp_host, pubsub_channel, caller_pid) do
+  defp create_sta_config(nvs_config, sntp_host, pubsub_channel, caller_pid) do
     sta_config =
       [
         connected: fn ->
@@ -220,15 +225,15 @@ defmodule WifiWiz.Ap do
       ] ++
         nvs_config
 
-    if snmp_host do
-      snmp_conf = [
-        host: snmp_host,
+    if sntp_host do
+      sntp_conf = [
+        host: sntp_host,
         synchronized: fn {tv_sec, tv_usec} ->
           IO.inspect("Synchronized time with SNTP server. tv_sec=#{tv_sec} tv_usec=#{tv_usec}")
         end
       ]
 
-      [sta: sta_config, snmp: snmp_conf]
+      [sta: sta_config, sntp: sntp_conf]
     else
       [sta: sta_config]
     end

@@ -13,6 +13,8 @@ defmodule WifiWiz do
     * `:ap` - Access point configuration keyword list with:
       * `:ssid` - The network name (default: `"AtomVM AP"`)
       * `:psk` - The network password (default: `"atomvm123"`)
+    * `:sntp_host` - SNTP time-sync server hostname (default: `"time-d-b.nist.gov"`,
+      `nil` to disable time sync)
     * `:pubsub` - Atom name of the `avm_pubsub` channel to publish status events on
       (default: `:pubsub`). All events are published on the topic `[:wifi_wiz, :wifi_status]`
       with the following messages:
