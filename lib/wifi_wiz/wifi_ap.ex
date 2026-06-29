@@ -5,53 +5,201 @@ defmodule WifiWiz.Ap do
   WIP - captive portal - to allow updating wifi credentials for STA mode
   """
 
+  @compile {:no_warn_undefined, [:avm_pubsub]}
+
+  @default_sta_retry [
+    max_duration_ms: 600_000,
+    backoff_base_ms: 5_000,
+    backoff_cap_ms: 30_000,
+    on_exhausted: :wipe_and_reboot
+  ]
+
+  @default_ap_config [ssid: "AtomVM AP", psk: "atomvm123"]
+
   @doc """
   Wifi configuration helper
 
   If there are no saved wifi credentials an AP is booted up
   serving a captive portal to enter your wifi credentials
+
+  ## Options
+
+    * `:ap` - Access point configuration keyword list (merged over the
+      defaults `[ssid: "AtomVM AP", psk: "atomvm123"]`)
+    * `:pubsub` - Atom name of the pubsub channel to publish status events on (default: `:pubsub`)
+    * `:sntp_host` - SNTP time-sync server hostname (default: `"time-d-b.nist.gov"`,
+      `nil` to disable)
+    * `:sta_retry` - STA retry configuration keyword list:
+      * `:max_duration_ms` - total time to keep retrying before giving up (default: 600_000)
+      * `:backoff_base_ms` - delay for first retry, doubles each attempt (default: 5_000)
+      * `:backoff_cap_ms` - maximum per-retry delay (default: 30_000)
+      * `:on_exhausted` - `:wipe_and_reboot` (default) or `:return_error`
   """
   def start(opts) do
-    ap_opts = Keyword.get(opts, :ap)
-    #  WifiWiz.Config.reset()
-    # if we have persisted ssid + psk connect as sta, do not run ap.
+    ap_opts = Keyword.merge(@default_ap_config, Keyword.get(opts, :ap, []))
+    pubsub_channel = Keyword.get(opts, :pubsub, :pubsub)
+    sntp_host = Keyword.get(opts, :sntp_host, "time-d-b.nist.gov")
+    sta_retry_opts = Keyword.get(opts, :sta_retry, [])
     nvs_config = WifiWiz.Config.get()
 
     if nvs_config[:ssid] !== "" and nvs_config[:psk] !== "" do
-      create_sta_config(nvs_config)
-      |> start_sta()
+      :avm_pubsub.pub(pubsub_channel, [:wifi_wiz, :wifi_status], :connecting)
+      config = create_sta_config(nvs_config, sntp_host, pubsub_channel, self())
+      start_sta(config, sta_retry_opts, pubsub_channel)
     else
+      :avm_pubsub.pub(pubsub_channel, [:wifi_wiz, :wifi_status], :ap_mode)
       cbs = Keyword.take(ap_opts, [:ap_started])
 
-      # no persisted config - run ap to collect creds
-      create_ap_config(ap_opts[:ssid], ap_opts[:psk], cbs)
+      create_ap_config(ap_opts[:ssid], ap_opts[:psk], cbs, pubsub_channel)
       |> start_ap()
     end
   end
 
-  defp start_sta(config) do
-    case :network.wait_for_sta(config[:sta]) do
-      {:ok, {ip, _mask, gateway}} = resp ->
-        IO.puts("Got #{inspect(ip)} from #{inspect(gateway)}")
+  defp start_sta(config, sta_retry_opts, pubsub_channel) do
+    retry = Keyword.merge(@default_sta_retry, sta_retry_opts)
 
-        resp
+    start_sta(
+      config,
+      retry[:max_duration_ms],
+      retry[:backoff_base_ms],
+      retry[:backoff_cap_ms],
+      retry[:on_exhausted],
+      pubsub_channel,
+      0,
+      0
+    )
+  end
 
-      {:error, reason} ->
-        IO.puts("failed to connect for #{reason}, clearing config + rebooting")
+  defp start_sta(
+         _config,
+         max_ms,
+         _base_ms,
+         _cap_ms,
+         on_exhausted,
+         pubsub_channel,
+         _attempt,
+         elapsed
+       )
+       when elapsed >= max_ms do
+    :io.format("STA retry exhausted after ~ps~n", [div(elapsed, 1000)])
+    :avm_pubsub.pub(pubsub_channel, [:wifi_wiz, :wifi_status], :sta_exhausted)
+
+    case on_exhausted do
+      :return_error ->
+        Process.sleep(100)
+        {:error, :sta_exhausted}
+
+      :wipe_and_reboot ->
+        IO.puts("Clearing creds + rebooting")
         WifiWiz.Config.reset()
         Process.sleep(5000)
-
         :esp.restart()
-        # not sure we will get here after the reboot, but return error anyway
-        {:error, :rebooting}
     end
   end
 
-  defp start_ap(config) do
+  defp start_sta(config, max_ms, base_ms, cap_ms, on_exhausted, pubsub_channel, attempt, elapsed) do
+    case start_network_and_wait(config) do
+      {:ok, {ip, mask, gateway}} ->
+        :io.format("Got ~p~n", [ip])
+
+        {:ok, {ip, mask, gateway}}
+
+      {:error, {:already_started, _pid}} ->
+        :io.format("WiFi already started, stopping and retrying~n")
+        :network.stop()
+        Process.sleep(1000)
+
+        start_sta(
+          config,
+          max_ms,
+          base_ms,
+          cap_ms,
+          on_exhausted,
+          pubsub_channel,
+          attempt,
+          elapsed + 1000
+        )
+
+      {:error, reason} ->
+        backoff = backoff_ms(attempt, base_ms, cap_ms)
+
+        :io.format("Attempt ~p failed (~p), retry in ~ps~n", [
+          attempt + 1,
+          reason,
+          div(backoff, 1000)
+        ])
+
+        :avm_pubsub.pub(
+          pubsub_channel,
+          [:wifi_wiz, :wifi_status],
+          {:sta_retry, attempt + 1, reason}
+        )
+
+        :network.stop()
+        Process.sleep(backoff)
+
+        start_sta(
+          config,
+          max_ms,
+          base_ms,
+          cap_ms,
+          on_exhausted,
+          pubsub_channel,
+          attempt + 1,
+          elapsed + backoff
+        )
+    end
+  end
+
+  # Starts the network driver directly (bypassing wait_for_sta's shadowing of
+  # user-supplied callbacks) and blocks until the got_ip callback signals back.
+  defp start_network_and_wait(config) do
+    flush_got_ip()
+
+    case :network.start(config) do
+      {:ok, _pid} ->
+        receive do
+          {:wifi_wiz_got_ip, ip, netmask, gateway} ->
+            {:ok, {ip, netmask, gateway}}
+        after
+          15_000 ->
+            {:error, :timeout}
+        end
+
+      error ->
+        error
+    end
+  end
+
+  # Drain any stale got_ip messages left in the mailbox from a previous attempt.
+  defp flush_got_ip() do
+    receive do
+      {:wifi_wiz_got_ip, _, _, _} -> flush_got_ip()
+    after
+      0 -> :ok
+    end
+  end
+
+  defp backoff_ms(0, base, _cap), do: base
+  defp backoff_ms(1, base, _cap), do: base * 2
+  defp backoff_ms(2, base, _cap), do: base * 4
+
+  defp backoff_ms(_attempt, _base, cap) do
+    cap
+  end
+
+  @doc """
+  Start AP mode with the given config. Blocks indefinitely.
+  Useful as a fallback when STA retries are exhausted.
+  """
+  def start_ap(config) do
     case :network.start(config) do
       {:ok, _pid} ->
         IO.puts("AP Network started! - waiting for credentials")
-        # this blocks indefinitely - wait until connected before moving onto to user code
+        Process.sleep(:infinity)
+
+      {:error, {:already_started, _pid}} ->
+        IO.puts("AP already running, blocking")
         Process.sleep(:infinity)
 
       error ->
@@ -59,62 +207,125 @@ defmodule WifiWiz.Ap do
     end
   end
 
-  defp create_sta_config(nvs_config) do
+  defp create_sta_config(nvs_config, sntp_host, pubsub_channel, caller_pid) do
     sta_config =
       [
         connected: fn ->
-          IO.puts("Connected to #{nvs_config[:ssid]}")
+          :io.format("Connected to ~s~n", [nvs_config[:ssid]])
         end,
-        got_ip: fn {ip, _netmask, gateway} ->
-          IO.puts("Got #{inspect(ip)} from #{inspect(gateway)}")
+        got_ip: fn {ip, netmask, gateway} ->
+          :io.format("Got ~p from ~p~n", [ip, gateway])
+          :avm_pubsub.pub(pubsub_channel, [:wifi_wiz, :wifi_status], {:connected, {ip, gateway}})
+          send(caller_pid, {:wifi_wiz_got_ip, ip, netmask, gateway})
         end,
         disconnected: fn ->
-          IO.puts("Disconnected from #{nvs_config[:ssid]}")
-          # must be bad creds? clear and reboot
+          IO.puts("Disconnected")
+          :avm_pubsub.pub(pubsub_channel, [:wifi_wiz, :wifi_status], :disconnected)
         end
       ] ++
         nvs_config
 
-    # snpm_config = [
-    #   host: "time-d-b.nist.gov",
-    #   synchronized: fn {tv_sec, tv_usec} ->
-    #     IO.inspect("Synchronized time with SNTP server. tv_sec=#{tv_sec} tv_usec=#{tv_usec}")
-    #   end
-    # ]
+    if sntp_host do
+      sntp_conf = [
+        host: sntp_host,
+        synchronized: fn {tv_sec, tv_usec} ->
+          IO.inspect("Synchronized time with SNTP server. tv_sec=#{tv_sec} tv_usec=#{tv_usec}")
+        end
+      ]
 
-    [
-      sta: sta_config
-      # snpm: snpm_config
-    ]
+      [sta: sta_config, sntp: sntp_conf]
+    else
+      [sta: sta_config]
+    end
   end
 
-  defp create_ap_config(ssid, psk, callbacks) do
+  @doc """
+  Build the AP + managed STA config tuple for `:network.start/1`.
+  """
+  def create_ap_config(ssid, psk, callbacks, pubsub_channel) do
     ap_started = callbacks[:ap_started] || fn -> :ok end
 
     ap_config = [
       ssid: ssid,
       psk: psk,
       ap_started: fn ->
+        :avm_pubsub.pub(pubsub_channel, [:wifi_wiz, :wifi_status], {:ap_mode, ssid})
         IO.puts("WifiWiz.AP Started ")
-        # spawn dns + http services
         spawn(fn -> WifiWiz.DNS.start() end)
-        spawn(fn -> WifiWiz.CaptiveHTTP.start() end)
-        ap_started.()
 
+        spawn(fn ->
+          Process.sleep(2000)
+
+          IO.puts("WifiWiz: scanning...")
+          scan_result = :network.wifi_scan([{:results, 10}, {:dwell, 300}])
+
+          networks =
+            case scan_result do
+              {:ok, {num, nets}} ->
+                :io.format("WifiWiz: got ~p nets~n", [num])
+                nets
+
+              _other ->
+                IO.puts("WifiWiz: scan fail")
+                []
+            end
+
+          filtered =
+            :lists.filter(
+              fn net -> Map.get(net, :ssid, "") != "" end,
+              networks
+            )
+
+          sorted =
+            :lists.sort(
+              fn a, b -> Map.get(a, :rssi, -100) >= Map.get(b, :rssi, -100) end,
+              filtered
+            )
+
+          deduped =
+            :lists.foldl(
+              fn net, acc ->
+                ssid = Map.get(net, :ssid)
+
+                case :lists.any(fn n -> Map.get(n, :ssid) == ssid end, acc) do
+                  true -> acc
+                  false -> [net | acc]
+                end
+              end,
+              [],
+              sorted
+            )
+
+          sorted = :lists.reverse(deduped)
+
+          :lists.foreach(
+            fn net ->
+              :io.format("SSID: ~s RSSI: ~p~n", [Map.get(net, :ssid, ""), Map.get(net, :rssi, 0)])
+            end,
+            sorted
+          )
+
+          WifiWiz.CaptiveHTTP.start(sorted, pubsub_channel)
+        end)
+
+        ap_started.()
       end,
       sta_connected: fn mac ->
-        IO.puts("STA connected with mac #{inspect(mac)}")
+        :io.format("STA connected with mac ~p~n", [mac])
+        :avm_pubsub.pub(pubsub_channel, [:wifi_wiz, :wifi_status], {:client_connected, mac})
       end,
       sta_ip_assigned: fn ip ->
-        IO.puts("STA assigned address #{inspect(ip)}")
+        :io.format("STA assigned address ~p~n", [ip])
       end,
       sta_disconnected: fn mac ->
-        IO.puts("STA disconnected with mac #{inspect(mac)}")
+        :io.format("STA disconnected with mac ~p~n", [mac])
+        :avm_pubsub.pub(pubsub_channel, [:wifi_wiz, :wifi_status], {:client_disconnected, mac})
       end
     ]
 
     [
-      ap: ap_config
+      ap: ap_config,
+      sta: [:managed]
     ]
   end
 end

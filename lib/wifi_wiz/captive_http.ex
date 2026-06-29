@@ -1,32 +1,25 @@
 defmodule WifiWiz.CaptiveHTTP do
   @moduledoc """
-  Captive portal web server for entering wifi credentials
+  Minimal captive portal web server for entering wifi credentials.
+  Designed for severe RAM constraints (ESP32-C3 / AtomVM).
   """
-  @page_title "Wifi Setup"
 
-  def start(port \\ 80) do
+  @compile {:no_warn_undefined, [:avm_pubsub]}
+
+  def start(scan_results, pubsub_channel, port \\ 80) do
     config = [
       {[],
        %{
-         handler: __MODULE__
+         handler: __MODULE__,
+         handler_config: %{scan_results: scan_results, pubsub_channel: pubsub_channel}
        }}
-      # cannot seem to get the file handler to work - it does not find the file from priv
-      # think i am missing something here for elixir
-      # {[],
-      #  %{
-      #    handler: :httpd_file_handler,
-      #    handler_config: %{
-      #      app: :wifi_wiz
-      #    }
-      #  }}
     ]
 
-    IO.puts("Starting httpd on port #{port}")
+    :io.format("Starting httpd on port ~p~n", [port])
 
     case AtomvmHttpd.start(port, config) do
       {:ok, pid} ->
         IO.puts("httpd started")
-
         {:ok, pid}
 
       err ->
@@ -36,123 +29,189 @@ defmodule WifiWiz.CaptiveHTTP do
   end
 
   def init_handler(suffix, config) do
-    {:ok, %{path_suffix: suffix, config: config}}
+    results =
+      case Map.get(config, :scan_results) do
+        nil -> []
+        r -> r
+      end
+
+    pubsub_channel = Map.get(config, :pubsub_channel, :pubsub)
+
+    {:ok, %{path_suffix: suffix, scan_results: results, pubsub_channel: pubsub_channel}}
   end
 
-  def handle_http_req(%{method: :get} = _req, _state) do
-    body = """
-    <main class="card">
-      <h1>AtomVM Wi-Fi Setup</h1>
-      <p>Enter your network SSID and passphrase to bring this device online.</p>
-      <form method="POST" action="/save">
-        <label for="ssid">Network SSID</label>
-        <input id="ssid" name="ssid" type="text" inputmode="text" autocapitalize="none" autocomplete="off" required />
-        <label for="psk">Passphrase</label>
-        <input id="psk" name="psk" type="password" inputmode="text" autocapitalize="none" autocomplete="off" required />
-        <button type="submit">Save and Connect</button>
-      </form>
-    </main>
-    """
+  # Build option iolists — never creates intermediate concatenated binaries.
+  defp opt_lines([], acc), do: :lists.reverse(acc)
 
-    {:close, %{"Content-Type" => "text/html"}, render_html(body)}
+  defp opt_lines([net | rest], acc) do
+    ssid = escape_html(Map.get(net, :ssid, ""))
+    rssi = Map.get(net, :rssi, 0)
+
+    opt = [
+      "<option value=\"",
+      ssid,
+      "\">",
+      ssid,
+      " (",
+      :erlang.integer_to_binary(rssi),
+      " dBm)</option>"
+    ]
+
+    opt_lines(rest, [opt | acc])
   end
 
-  def handle_http_req(%{method: :post} = req, _state) do
-    %{
-      headers: _headers,
-      body: body
-    } = req
+  def handle_http_req(req, state) do
+    :io.format("HTTP req method=~p~n", [Map.get(req, :method)])
 
-    # extract body (ssid + psk and store in nvs)
-    params = parse_form_body(body)
-    IO.puts("received params:\n#{inspect(params)}")
-    {:ok, config} = WifiWiz.Config.put(params.ssid, params.psk)
+    case Map.get(req, :method) do
+      :get ->
+        nets =
+          case Map.get(state, :scan_results) do
+            nil -> []
+            r -> r
+          end
 
-    body = """
-    <section class="card">
-      <h2>Connecting to #{config[:ssid]}...</h2>
-      <p>Your credentials were received. Attempting to join the network now.</p>
-      <p>The device may reboot or reconnect shortly. Feel free to close this tab.</p>
-    </section>
-    <script>
-      setTimeout(()=>{
-       window.close()
-      }, 5500)
-    </script>
-    """
+        :io.format("HTTP rendering ~p nets~n", [:erlang.length(nets)])
+        options = opt_lines(nets, [])
 
-    # restart after responding to post req
-    spawn(fn ->
-      Process.sleep(5000)
-      :esp.restart()
-    end)
+        body = [
+          "<h1>WiFi Setup</h1>",
+          "<form method=\"POST\" action=\"/save\">",
+          "<label>Network</label>",
+          "<select onchange=\"document.getElementById('s').value=this.value=='__custom__'?'':this.value\">",
+          "<option value=\"\">-- Select --</option>",
+          options,
+          "<option value=\"__custom__\">Custom...</option>",
+          "</select>",
+          "<label>SSID</label>",
+          "<input id=\"s\" name=\"ssid\" type=\"text\" required placeholder=\"SSID\">",
+          "<label>Password</label>",
+          "<input name=\"psk\" type=\"password\" required placeholder=\"Password\">",
+          "<button>Connect</button>",
+          "</form>"
+        ]
 
-    {:close, %{"Content-Type" => "text/html"}, render_html(body)}
+        {:close, %{"Content-Type" => "text/html"}, html_page(body)}
+
+      :post ->
+        %{body: body} = req
+        params = parse_form_body(body)
+        ssid = Map.get(params, :ssid)
+        psk = Map.get(params, :psk)
+
+        :io.format("HTTP post for ssid=~p~n", [ssid])
+
+        cond do
+          ssid in [nil, ""] or psk in [nil, ""] ->
+            err_body = [
+              "<h2>Missing credentials</h2>",
+              "<p>SSID and password are required.</p>",
+              "<p><a href=\"/\">Try again</a></p>"
+            ]
+
+            {:close, %{"Content-Type" => "text/html"}, html_page(err_body)}
+
+          true ->
+            {:ok, config} = WifiWiz.Config.put(ssid, psk)
+            saved_ssid = :proplists.get_value(:ssid, config)
+            pubsub_channel = Map.get(state, :pubsub_channel, :pubsub)
+
+            :avm_pubsub.pub(
+              pubsub_channel,
+              [:wifi_wiz, :wifi_status],
+              {:credentials_saved, saved_ssid}
+            )
+
+            body = [
+              "<h2>Saved</h2>",
+              "<p>Connecting to ",
+              escape_html(saved_ssid),
+              "...</p>",
+              "<script>setTimeout(()=>window.close(),5500)</script>"
+            ]
+
+            spawn(fn ->
+              Process.sleep(5000)
+              :esp.restart()
+            end)
+
+            {:close, %{"Content-Type" => "text/html"}, html_page(body)}
+        end
+
+      _ ->
+        {:error, :internal_server_error}
+    end
   end
 
-  def handle_http_req(_req, _state) do
-    {:error, :internal_server_error}
+  defp parse_form_body(body) do
+    :lists.foldl(
+      fn
+        "ssid=" <> ssid, acc -> Map.put(acc, :ssid, url_decode(ssid))
+        "psk=" <> psk, acc -> Map.put(acc, :psk, url_decode(psk))
+        _, acc -> acc
+      end,
+      %{},
+      :binary.split(body, "&", [:global])
+    )
   end
 
-  # decode application/x-www-form-urlencoded payloads into a map without URI helpers
-  def parse_form_body(body) do
-    body
-    |> :binary.split("&")
-    |> Enum.reduce(%{}, fn
-      "ssid=" <> ssid, acc -> Map.put(acc, :ssid, ssid)
-      "psk=" <> psk, acc -> Map.put(acc, :psk, psk)
-      _, acc -> acc
-    end)
+  # Minimal application/x-www-form-urlencoded decoder.
+  # Converts '+' to space, then decodes '%XX' percent-encoded sequences.
+  defp url_decode(binary) do
+    binary
+    |> :binary.replace("+", " ", [:global])
+    |> percent_decode()
   end
 
-  defp render_html(contents, title \\ @page_title) do
-    """
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-    <meta charset="UTF-8" />
-    <title>#{title}</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <style>
-    :root { color-scheme: light dark; font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif; line-height: 1.5; }
-    *, *::before, *::after { box-sizing: border-box; }
-    body { margin: 0; min-height: 100dvh; display: flex; align-items: center; justify-content: center; padding: clamp(16px, 6vw, 24px); background-color: #f3f4f6; color: #111827; }
-    .card { width: min(320px, 100%); padding: clamp(18px, 5vw, 24px); border-radius: 18px; border: 1px solid rgba(15, 23, 42, 0.12); background: rgba(255, 255, 255, 0.94); box-shadow: 0 18px 36px rgba(15, 23, 42, 0.12); backdrop-filter: blur(6px); margin: 0 auto; }
-    h1 { margin: 0 0 10px; font-size: clamp(20px, 3vw, 24px); font-weight: 650; text-align: center; }
-    h2 { margin: 0 0 12px; font-size: clamp(20px, 3vw, 24px); font-weight: 650; text-align: center; }
-    p { margin: 0 0 20px; font-size: clamp(14px, 2.5vw, 16px); text-align: center; color: #4b5563; }
-    form { display: grid; gap: 8px; width: 100%; }
-    label { display: block; font-size: 14px; font-weight: 600; margin-bottom: 4px; color: #1f2937; }
-    input[type=\"text\"], input[type=\"password\"] { width: 100%; padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(15, 23, 42, 0.16); background: rgba(249, 250, 251, 0.9); color: inherit; transition: border-color 0.2s ease, box-shadow 0.2s ease; font-size: 16px; }
-    input[type=\"text\"]:focus, input[type=\"password\"]:focus { outline: none; border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.18); }
-    button { width: 100%; padding: 10px 16px; border-radius: 999px; border: none; background: linear-gradient(135deg, #2563eb, #1d4ed8); color: #f9fafb; font-weight: 600; font-size: 16px; cursor: pointer; transition: transform 0.2s ease, box-shadow 0.2s ease; }
-    button:hover { transform: translateY(-1px); box-shadow: 0 12px 16px rgba(37, 99, 235, 0.25); }
-    button:focus-visible { outline: none; box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.3); }
-    @media (max-width: 480px) {
-      body { padding: 10px; }
-      .card { border-radius: 16px; padding: 16px; box-shadow: 0 14px 28px rgba(15, 23, 42, 0.12); }
-      p { margin-bottom: 16px; }
-    }
-    @media (min-width: 768px) {
-      body { padding: 48px; }
-      form { gap: 16px; }
-    }
-    @media (prefers-color-scheme: dark) {
-      body { background-color: #0f172a; color: #e2e8f0; }
-      .card { background: rgba(15, 23, 42, 0.85); border: 1px solid rgba(148, 163, 184, 0.2); box-shadow: 0 24px 48px rgba(2, 6, 23, 0.6); }
-      p { color: #cbd5f5; }
-      label { color: #e2e8f0; }
-      input[type=\"text\"], input[type=\"password\"] { background: rgba(15, 23, 42, 0.7); border: 1px solid rgba(148, 163, 184, 0.35); color: #f8fafc; }
-      input[type=\"text\"]:focus, input[type=\"password\"]:focus { border-color: #38bdf8; box-shadow: 0 0 0 4px rgba(56, 189, 248, 0.22); }
-      button { background: linear-gradient(135deg, #38bdf8, #0ea5e9); color: #0b1120; }
-      button:hover { box-shadow: 0 12px 22px rgba(56, 189, 248, 0.35); }
-    }
-    </style>
-    </head>
-    <body>
-    #{contents}
-    </body>
-    </html>
-    """
+  defp percent_decode(<<>>), do: <<>>
+
+  defp percent_decode(<<"%", h1, h2, rest::binary>>) do
+    # Malformed sequences (e.g. "%ZZ") would crash list_to_integer/2; fall back
+    # to emitting the literal bytes so user input can't take down the portal.
+    try do
+      :erlang.list_to_integer([h1, h2], 16)
+    rescue
+      _ -> :error
+    else
+      byte -> {:ok, byte}
+    end
+    |> case do
+      {:ok, byte} -> <<byte::8, percent_decode(rest)::binary>>
+      :error -> <<"%", h1, h2, percent_decode(rest)::binary>>
+    end
+  end
+
+  defp percent_decode(<<c, rest::binary>>) do
+    <<c, percent_decode(rest)::binary>>
+  end
+
+  defp escape_html(binary) when is_binary(binary) do
+    binary
+    |> :binary.replace("&", "&amp;", [:global])
+    |> :binary.replace("<", "&lt;", [:global])
+    |> :binary.replace(">", "&gt;", [:global])
+    |> :binary.replace(~S("), ~S(&quot;), [:global])
+  end
+
+  defp escape_html(_), do: ""
+
+  # Build the full page as an iolist, then convert to a single binary once.
+  defp html_page(body) do
+    :erlang.iolist_to_binary([
+      "<!DOCTYPE html><html><head><meta charset=\"UTF-8\">",
+      "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">",
+      "<title>WiFi</title><style>",
+      "body{font-family:sans-serif;margin:0;padding:16px;background:#f0f0f0}",
+      ".card{background:#fff;padding:20px;border-radius:8px;",
+      "box-shadow:0 2px 8px rgba(0,0,0,0.1);width:100%;max-width:320px;margin:auto}",
+      "h1,h2{margin:0 0 12px;font-size:20px;text-align:center}",
+      "label{display:block;margin:8px 0 4px;font-size:14px;font-weight:bold}",
+      "input,select,button{width:100%;padding:10px;border:1px solid #ccc;",
+      "border-radius:4px;box-sizing:border-box;font-size:16px;margin-bottom:8px}",
+      "button{background:#2563eb;color:#fff;border:none;cursor:pointer}",
+      "</style></head><body><div class=\"card\">",
+      body,
+      "</div></body></html>"
+    ])
   end
 end
