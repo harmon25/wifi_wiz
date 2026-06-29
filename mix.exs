@@ -27,7 +27,7 @@ defmodule WifiWiz.MixProject do
   defp deps do
     [
       {:exatomvm, github: "AtomVM/ExAtomVM", runtime: false, only: :dev},
-      {:atomvm_httpd, github: "harmon25/atomvm_httpd", branch: "improvements"}
+      {:atomvm_httpd, github: "harmon25/atomvm_httpd", branch: "main"}
     ]
   end
 end
